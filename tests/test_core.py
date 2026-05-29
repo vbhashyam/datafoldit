@@ -164,6 +164,29 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertAlmostEqual(parsed["amount"], 6160.00, places=2)
         self.assertAlmostEqual(parsed["balance_due"], 0.00, places=2)
 
+    def test_invoice_parser_handles_screenshot_ocr_layout(self):
+        text = """
+        Invoice Details
+        Balance Due
+        $11,440.00
+        Bansar Technologies Inc .
+        Due on: Thu, Jun 25 2026
+        Terms: Net 35
+        Invoice# Invoice Date
+        INV-000012 Thu, May 21 2026
+        Consulting Service $11,440.00
+        Subtotal $11,440.00
+        Total $11,440.00
+        """
+        parsed = parse_invoice_text(text)
+        self.assertEqual(parsed["invoice_number"], "INV-000012")
+        self.assertEqual(parsed["date"], "2026-05-21")
+        self.assertEqual(parsed["due_date"], "2026-06-25")
+        self.assertEqual(parsed["customer"], "Bansar Technologies Inc")
+        self.assertEqual(parsed["status"], "Open")
+        self.assertAlmostEqual(parsed["amount"], 11440.00, places=2)
+        self.assertAlmostEqual(parsed["balance_due"], 11440.00, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

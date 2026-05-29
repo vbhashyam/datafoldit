@@ -15,8 +15,8 @@ MONEY_RE = re.compile(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\
 INVOICE_RE = re.compile(r"\b(INV[-\s]?(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,}|INV[0-9]{4,})\b", re.I)
 LABELED_INVOICE_RE = re.compile(r"\binvoice\s*(?:number|#|no\.?)?\s*[:#]\s*([A-Z0-9-]{4,})\b", re.I)
 DATE_RE = re.compile(
-    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
-    r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b"
+    r"\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}\b"
     r"|\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
     r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b"
     r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b"
@@ -37,6 +37,9 @@ def extract_invoice_from_pdf(pdf_path: str | Path) -> dict[str, Any]:
 
 
 def extract_text(pdf_path: Path) -> str:
+    text = extract_text_with_image_ocr(pdf_path) if is_image_file(pdf_path) else ""
+    if useful_text(text):
+        return text
     text = extract_text_with_pdftoppm_ocr(pdf_path)
     if not useful_text(text):
         text = extract_text_with_quicklook_ocr(pdf_path)
@@ -60,6 +63,7 @@ def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=20,
             )
             result = subprocess.run(
                 [tesseract, str(image_prefix.with_suffix(".png")), "stdout"],
@@ -67,9 +71,10 @@ def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=25,
             )
             return result.stdout
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return ""
 
 
@@ -86,6 +91,7 @@ def extract_text_with_quicklook_ocr(pdf_path: Path) -> str:
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=20,
             )
             images = sorted(tmp_path.glob("*.png"))
             if not images:
@@ -96,10 +102,29 @@ def extract_text_with_quicklook_ocr(pdf_path: Path) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=25,
             )
             return result.stdout
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return ""
+
+
+def extract_text_with_image_ocr(image_path: Path) -> str:
+    tesseract = find_tool("tesseract")
+    if not tesseract:
+        return ""
+    try:
+        result = subprocess.run(
+            [tesseract, str(image_path), "stdout"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=25,
+        )
+        return result.stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
 
 
 def find_tool(name: str) -> str | None:
@@ -113,6 +138,23 @@ def find_tool(name: str) -> str | None:
     return None
 
 
+def is_image_file(path: Path) -> bool:
+    try:
+        header = path.read_bytes()[:32]
+    except OSError:
+        return False
+    suffix = path.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
+        return True
+    return (
+        header.startswith(b"\x89PNG\r\n\x1a\n")
+        or header.startswith(b"\xff\xd8\xff")
+        or header.startswith((b"II*\x00", b"MM\x00*"))
+        or header.startswith(b"BM")
+        or (header.startswith(b"RIFF") and b"WEBP" in header[:16])
+    )
+
+
 def useful_text(text: str) -> bool:
     words = re.findall(r"[A-Za-z]{3,}", text or "")
     return len(words) >= 5
@@ -123,7 +165,7 @@ def parse_invoice_text(text: str) -> dict[str, Any]:
     invoice_number = extract_invoice_number(normalized)
     dates = extract_dates(normalized)
     invoice_date = extract_labeled_date(normalized, ["Invoice Date", "Date"]) or (dates[0] if dates else None)
-    due_date = extract_labeled_date(normalized, ["Due Date", "Payment Due"])
+    due_date = extract_labeled_date(normalized, ["Due Date", "Payment Due", "Due on"])
     if not due_date and "due upon receipt" in normalized.lower():
         due_date = invoice_date
     if not due_date:
@@ -160,16 +202,27 @@ def extract_invoice_number(text: str) -> str | None:
         if "invoice" in line.lower():
             labeled = LABELED_INVOICE_RE.search(line)
             if labeled:
-                return labeled.group(1).replace(" ", "-").upper()
+                candidate = normalize_invoice_candidate(labeled.group(1))
+                if candidate:
+                    return candidate
             match = INVOICE_RE.search(line)
             if match:
-                return match.group(1).replace(" ", "-").upper()
+                candidate = normalize_invoice_candidate(match.group(1))
+                if candidate:
+                    return candidate
             for following in lines[index + 1 : index + 4]:
                 match = INVOICE_RE.search(following)
                 if match:
-                    return match.group(1).replace(" ", "-").upper()
+                    candidate = normalize_invoice_candidate(match.group(1))
+                    if candidate:
+                        return candidate
     match = INVOICE_RE.search(text)
-    return match.group(1).replace(" ", "-").upper() if match else None
+    return normalize_invoice_candidate(match.group(1)) if match else None
+
+
+def normalize_invoice_candidate(value: str) -> str | None:
+    candidate = value.replace(" ", "-").upper()
+    return candidate if re.search(r"\d", candidate) else None
 
 
 def extract_dates(text: str) -> list[str]:
@@ -197,8 +250,18 @@ def extract_labeled_date(text: str, labels: list[str]) -> str | None:
 
 
 def parse_date(value: str) -> str | None:
-    value = value.strip()
-    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+    value = re.sub(r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+", "", value.strip(), flags=re.I)
+    for fmt in (
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%b %d %Y",
+        "%B %d %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%Y-%m-%d",
+    ):
         try:
             return datetime.strptime(value, fmt).date().isoformat()
         except ValueError:
@@ -239,12 +302,17 @@ def extract_total_amount(text: str) -> float:
 
 
 def extract_balance_due(text: str) -> float | None:
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         if "balance due" not in line.lower():
             continue
         amounts = [db.amount_value(match.group(1)) for match in MONEY_RE.finditer(line)]
         if amounts:
             return amounts[-1]
+        for following in lines[index + 1 : index + 4]:
+            amounts = [db.amount_value(match.group(1)) for match in MONEY_RE.finditer(following)]
+            if amounts:
+                return amounts[-1]
     return None
 
 
@@ -266,15 +334,21 @@ def extract_customer(text: str) -> str | None:
             if label.lower() in line.lower():
                 for following in lines[index + 1 : index + 35]:
                     if looks_like_customer_name(following):
-                        return following
+                        return clean_customer_candidate(following)
     for line in lines[:12]:
         if re.search(r"\b(LLC|Inc\.?|Corporation|Technologies|Systems)\b", line, re.I):
-            return line
+            return clean_customer_candidate(line)
     return None
 
 
 def clean_customer_candidate(line: str) -> str:
-    return re.split(r"\b(?:Invoice Date|Due Date|Terms|Invoice #|Balance Due)\b\s*:?", line, maxsplit=1, flags=re.I)[0].strip()
+    candidate = re.split(
+        r"\b(?:Invoice Date|Due Date|Terms|Invoice #|Balance Due)\b\s*:?",
+        line,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    return candidate.strip(" .,:;-")
 
 
 def looks_like_customer_name(line: str) -> bool:

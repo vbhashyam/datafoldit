@@ -46,11 +46,9 @@
         fileInput.addEventListener("change", function () {
           if (fileInput.files && fileInput.files.length > 0) {
             markSubmitting();
-            if (uploadForm.requestSubmit) {
-              uploadForm.requestSubmit();
-            } else {
+            window.setTimeout(function () {
               uploadForm.submit();
-            }
+            }, 0);
           }
         });
       }
