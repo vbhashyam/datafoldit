@@ -459,6 +459,57 @@ th.money {
   margin: 0;
 }
 
+.inline-delete-form .button.danger.icon-button {
+  background: #2b1720;
+  color: #ffb4b4;
+  border: 1px solid #7f2a35;
+  box-shadow: none;
+}
+
+.inline-delete-form .button.danger.icon-button:hover {
+  background: #9f2735;
+  color: #ffffff;
+  filter: none;
+}
+
+.bulk-review-table {
+  min-width: 1180px;
+}
+
+.bulk-review-table th:first-child,
+.bulk-review-table td:first-child {
+  width: 64px;
+  text-align: center;
+}
+
+.bulk-review-table input,
+.bulk-review-table select {
+  min-width: 120px;
+}
+
+.bulk-review-table input[name^="customer_"] {
+  min-width: 220px;
+}
+
+.bulk-review-table input[name^="amount_"],
+.bulk-review-table input[name^="balance_due_"] {
+  min-width: 130px;
+}
+
+.bulk-check {
+  width: 18px;
+  min-height: 18px;
+}
+
+.bulk-error-row td {
+  color: #ffc1c1;
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.bulk-error-row strong {
+  color: #ffffff;
+}
+
 .negative {
   color: var(--red);
   font-weight: 800;
