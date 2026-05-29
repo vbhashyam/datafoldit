@@ -7,5 +7,6 @@ data/*.db
 data/*.sqlite
 data/attachments/
 data/backups/
+data-test/
 exports/*.xlsx
 exports/*.sqlite
