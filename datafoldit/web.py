@@ -138,7 +138,7 @@ def make_handler(db_path: Path):
             elif path == "/payroll":
                 self.send_html(render_payroll(self.conn, flash, payroll_filter_from_query(query)))
             elif path == "/invoices":
-                self.send_html(render_invoices(self.conn, flash, filters))
+                self.send_html(render_invoices(self.conn, flash, invoice_filter_from_query(query)))
             elif path == "/reports":
                 self.send_html(render_reports(self.conn, flash, filters))
             elif path == "/export.xlsx":
@@ -200,6 +200,10 @@ def make_handler(db_path: Path):
                     db.update_invoice_status(self.conn, int(fields.get("invoice_id") or 0), fields.get("status") or "")
                     self.conn.commit()
                     self.redirect(self.headers.get("Referer", "/invoices"))
+                elif parsed.path == "/invoices/delete":
+                    db.delete_invoice(self.conn, int(fields.get("invoice_id") or 0))
+                    self.conn.commit()
+                    self.redirect("/invoices?flash=Invoice+deleted")
                 elif parsed.path == "/import":
                     path = fields.get("workbook_path") or str(DEFAULT_SOURCE_XLSX)
                     counts = import_company_workbook(self.conn, path, replace=bool(fields.get("replace")))
@@ -404,6 +408,14 @@ def payroll_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     return filters
 
 
+def invoice_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
+    filters = date_filter_from_query(query)
+    filters["customer"] = (first(query, "customer") or "").strip()
+    status = (first(query, "status") or "").strip()
+    filters["status"] = status if status in set(INVOICE_STATUS_OPTIONS) else ""
+    return filters
+
+
 def filter_rows_by_period(rows: list[sqlite3.Row], date_key: str, filters: dict[str, str]) -> list[sqlite3.Row]:
     year = filters.get("year", "")
     month = filters.get("month", "")
@@ -428,6 +440,17 @@ def filter_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> lis
     if not employee:
         return rows
     return [row for row in rows if payroll_employee_name(row) == employee]
+
+
+def filter_invoice_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    rows = filter_rows_by_period(rows, "date", filters)
+    customer = filters.get("customer", "")
+    status = filters.get("status", "")
+    if customer:
+        rows = [row for row in rows if str(row["customer"] or "") == customer]
+    if status:
+        rows = [row for row in rows if invoice_status_label(row) == status]
+    return rows
 
 
 def period_label(filters: dict[str, str]) -> str:
@@ -542,6 +565,56 @@ def payroll_filter_form(conn, filters: dict[str, str]) -> str:
     <form class="filter-form" method="get" action="/payroll">
       <label class="wide">Employee
         <select name="employee">{''.join(employee_options)}</select>
+      </label>
+      <label>Year
+        <select name="year">{''.join(year_options)}</select>
+      </label>
+      <label>Month
+        <select name="month">{''.join(month_options)}</select>
+      </label>
+      <button class="button compact" type="submit">Apply</button>
+      {clear_button}
+    </form>
+    """
+
+
+def invoice_filter_form(conn, filters: dict[str, str]) -> str:
+    selected_customer = filters.get("customer", "")
+    selected_status = filters.get("status", "")
+    selected_year = filters.get("year", "")
+    selected_month = filters.get("month", "")
+    customer_options = ['<option value="">All customers</option>']
+    customer_options.extend(
+        f'<option value="{esc(customer)}"{" selected" if selected_customer == customer else ""}>{esc(customer)}</option>'
+        for customer in db.distinct_values(conn, "invoices", "customer")
+    )
+    status_options = ['<option value="">All statuses</option>']
+    status_options.extend(
+        f'<option value="{esc(status)}"{" selected" if selected_status == status else ""}>{esc(status)}</option>'
+        for status in INVOICE_STATUS_OPTIONS
+    )
+    year_options = ['<option value="">All years</option>']
+    year_options.extend(
+        f'<option value="{esc(year)}"{" selected" if selected_year == year else ""}>{esc(year)}</option>'
+        for year in years_for_scope(conn, "invoices")
+    )
+    month_options = ['<option value="">All months</option>']
+    month_options.extend(
+        f'<option value="{esc(value)}"{" selected" if selected_month == value else ""}>{esc(label)}</option>'
+        for value, label in MONTHS
+    )
+    clear_button = (
+        '<a class="button muted compact" href="/invoices">Clear</a>'
+        if selected_customer or selected_status or selected_year or selected_month
+        else ""
+    )
+    return f"""
+    <form class="filter-form" method="get" action="/invoices">
+      <label class="wide">Customer
+        <select name="customer">{''.join(customer_options)}</select>
+      </label>
+      <label>Status
+        <select name="status">{''.join(status_options)}</select>
       </label>
       <label>Year
         <select name="year">{''.join(year_options)}</select>
@@ -1082,9 +1155,19 @@ def invoice_status_inline_control(row) -> str:
     """
 
 
+def invoice_delete_control(row) -> str:
+    label = row["invoice_number"] or "this invoice"
+    return f"""
+    <form class="inline-delete-form" method="post" action="/invoices/delete" data-confirm-message="Delete invoice {esc(label)}?">
+      <input type="hidden" name="invoice_id" value="{esc(row["id"])}">
+      <button class="button danger compact" type="submit">Delete</button>
+    </form>
+    """
+
+
 def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
-    rows = filter_rows_by_period(db.rows_for_table(conn, "invoices"), "date", filters)
+    rows = filter_invoice_rows(db.rows_for_table(conn, "invoices"), filters)
     next_number = db.next_invoice_number(conn)
     active_rows = [row for row in rows if not row["is_void"]]
     invoice_total = sum(db.amount_value(row["amount"]) for row in active_rows)
@@ -1123,7 +1206,7 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     </form>
     """
     table = render_table(
-        ["Date", "Invoice #", "Customer", "Status", "Due Date", "Amount", "Balance Due", "Attachment"],
+        ["Date", "Invoice #", "Customer", "Status", "Due Date", "Amount", "Balance Due", "Attachment", "Action"],
         [
             [
                 row["date"],
@@ -1134,16 +1217,17 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
                 money(row["amount"]),
                 money(row["balance_due"]),
                 attachment_link(row["source_pdf"] if "source_pdf" in row.keys() else None),
+                invoice_delete_control(row),
             ]
             for row in rows
         ],
-        raw_columns={3, 7},
+        raw_columns={3, 7, 8},
         money_columns={5, 6},
     )
     extract_panel = f'<div class="panel-body">{extract_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
     content = section_stack(kpis, panel("Read Invoice PDF", extract_panel), panel("New Invoice", form_panel), panel("Invoice Ledger", table))
-    return layout(conn, "Invoices", "Receivables", "/invoices", content, flash, period_filter_form(conn, "/invoices", "invoices", filters))
+    return layout(conn, "Invoices", "Receivables", "/invoices", content, flash, invoice_filter_form(conn, filters))
 
 
 def render_invoice_review(conn, extracted: dict, flash: str | None = None) -> str:

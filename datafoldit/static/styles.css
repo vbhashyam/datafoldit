@@ -455,6 +455,10 @@ th.money {
   padding: 5px 9px;
 }
 
+.inline-delete-form {
+  margin: 0;
+}
+
 .negative {
   color: var(--red);
   font-weight: 800;
@@ -573,6 +577,12 @@ textarea {
 .button.warning {
   background: var(--amber);
   color: #111827;
+}
+
+.button.danger {
+  background: #7f1d1d;
+  color: #fee2e2;
+  border: 1px solid #b91c1c;
 }
 
 .button:hover {

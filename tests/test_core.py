@@ -8,7 +8,7 @@ from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
 from datafoldit.transaction_import import parse_transaction_text
-from datafoldit.web import filter_rows_by_period
+from datafoldit.web import filter_invoice_rows, filter_rows_by_period
 
 
 class DataFoldCoreTests(unittest.TestCase):
@@ -222,6 +222,10 @@ class DataFoldCoreTests(unittest.TestCase):
             row["invoice_number"]: row
             for row in self.conn.execute("SELECT * FROM invoices WHERE invoice_number LIKE 'INV-STATUS-%'")
         }
+        acme_rows = filter_invoice_rows(list(rows.values()), {"customer": "Acme LLC", "status": "", "year": "", "month": ""})
+        received_rows = filter_invoice_rows(list(rows.values()), {"customer": "", "status": "Received", "year": "", "month": ""})
+        self.assertEqual([row["invoice_number"] for row in acme_rows], ["INV-STATUS-001"])
+        self.assertEqual([row["invoice_number"] for row in received_rows], ["INV-STATUS-001"])
         self.assertEqual(rows["INV-STATUS-001"]["received"], "Y")
         self.assertEqual(rows["INV-STATUS-001"]["is_void"], 0)
         self.assertEqual(rows["INV-STATUS-001"]["status"], "Paid")
@@ -249,6 +253,12 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(voided["received"], "N")
         self.assertEqual(voided["is_void"], 1)
         self.assertAlmostEqual(voided["balance_due"], 0.0, places=2)
+        db.delete_invoice(self.conn, rows["INV-STATUS-002"]["id"])
+        deleted = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM invoices WHERE invoice_number = ?",
+            ("INV-STATUS-002",),
+        ).fetchone()
+        self.assertEqual(deleted["count"], 0)
 
 
 if __name__ == "__main__":
