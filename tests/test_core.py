@@ -141,6 +141,29 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(parsed["customer"], "A2systemsLLC")
         self.assertAlmostEqual(parsed["amount"], 17.21, places=2)
 
+    def test_invoice_parser_handles_day_month_dates_and_paid_balance(self):
+        text = """
+        Invoice
+        # INV-000001
+        Bill To
+        The Quantum Core Technologies LLC
+        Invoice Date: 12 Feb 2026
+        Terms : Net 60
+        Due Date : 13 Apr 2026
+        Total $6,160.00
+        Payment Made (-) 6,160.00
+        Balance Due $0.00
+        """
+        parsed = parse_invoice_text(text)
+        self.assertEqual(parsed["invoice_number"], "INV-000001")
+        self.assertEqual(parsed["date"], "2026-02-12")
+        self.assertEqual(parsed["due_date"], "2026-04-13")
+        self.assertEqual(parsed["customer"], "The Quantum Core Technologies LLC")
+        self.assertEqual(parsed["status"], "Paid")
+        self.assertEqual(parsed["received"], "Y")
+        self.assertAlmostEqual(parsed["amount"], 6160.00, places=2)
+        self.assertAlmostEqual(parsed["balance_due"], 0.00, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

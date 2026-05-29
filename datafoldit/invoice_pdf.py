@@ -17,6 +17,8 @@ LABELED_INVOICE_RE = re.compile(r"\binvoice\s*(?:number|#|no\.?)?\s*[:#]\s*([A-Z
 DATE_RE = re.compile(
     r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
     r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b"
+    r"|\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+    r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b"
     r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b"
     r"|\b\d{4}-\d{2}-\d{2}\b",
     re.I,
@@ -46,8 +48,8 @@ def extract_text(pdf_path: Path) -> str:
 
 
 def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
-    pdftoppm = shutil.which("pdftoppm")
-    tesseract = shutil.which("tesseract")
+    pdftoppm = find_tool("pdftoppm")
+    tesseract = find_tool("tesseract")
     if not pdftoppm or not tesseract:
         return ""
     with tempfile.TemporaryDirectory(prefix="datafoldit-invoice-ocr-") as tmp:
@@ -72,29 +74,43 @@ def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
 
 
 def extract_text_with_quicklook_ocr(pdf_path: Path) -> str:
-    qlmanage = shutil.which("qlmanage")
-    tesseract = shutil.which("tesseract")
+    qlmanage = find_tool("qlmanage")
+    tesseract = find_tool("tesseract")
     if not qlmanage or not tesseract:
         return ""
     with tempfile.TemporaryDirectory(prefix="datafoldit-invoice-ocr-") as tmp:
         tmp_path = Path(tmp)
-        subprocess.run(
-            [qlmanage, "-t", "-s", "1800", "-o", str(tmp_path), str(pdf_path)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        images = sorted(tmp_path.glob("*.png"))
-        if not images:
+        try:
+            subprocess.run(
+                [qlmanage, "-t", "-s", "1800", "-o", str(tmp_path), str(pdf_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            images = sorted(tmp_path.glob("*.png"))
+            if not images:
+                return ""
+            result = subprocess.run(
+                [tesseract, str(images[0]), "stdout"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            return result.stdout
+        except subprocess.CalledProcessError:
             return ""
-        result = subprocess.run(
-            [tesseract, str(images[0]), "stdout"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return result.stdout
+
+
+def find_tool(name: str) -> str | None:
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        candidate = Path(directory) / name
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def useful_text(text: str) -> bool:
@@ -113,11 +129,14 @@ def parse_invoice_text(text: str) -> dict[str, Any]:
     if not due_date:
         due_date = infer_due_date(invoice_date)
     total_amount = extract_total_amount(normalized)
+    extracted_balance_due = extract_balance_due(normalized)
     customer = extract_customer(normalized)
     status = "Open"
-    if "paid" in normalized.lower() and "balance due" not in normalized.lower():
+    if extracted_balance_due is not None and extracted_balance_due <= 0:
         status = "Paid"
-    balance_due = 0.0 if status == "Paid" else total_amount
+    elif "paid" in normalized.lower() and "balance due" not in normalized.lower():
+        status = "Paid"
+    balance_due = extracted_balance_due if extracted_balance_due is not None else (0.0 if status == "Paid" else total_amount)
     return {
         "date": invoice_date,
         "invoice_number": invoice_number,
@@ -179,7 +198,7 @@ def extract_labeled_date(text: str, labels: list[str]) -> str | None:
 
 def parse_date(value: str) -> str | None:
     value = value.strip()
-    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
         try:
             return datetime.strptime(value, fmt).date().isoformat()
         except ValueError:
@@ -219,6 +238,16 @@ def extract_total_amount(text: str) -> float:
     return max(meaningful) if meaningful else 0.0
 
 
+def extract_balance_due(text: str) -> float | None:
+    for line in text.splitlines():
+        if "balance due" not in line.lower():
+            continue
+        amounts = [db.amount_value(match.group(1)) for match in MONEY_RE.finditer(line)]
+        if amounts:
+            return amounts[-1]
+    return None
+
+
 def extract_customer(text: str) -> str | None:
     lines = text.splitlines()
     for label in ("Bill To", "Bill To Address", "Sold To", "Sold To Address", "Customer"):
@@ -227,7 +256,8 @@ def extract_customer(text: str) -> str | None:
                 for following in lines[index + 1 : index + 5]:
                     if not following or "address" in following.lower() or "charge" in following.lower():
                         continue
-                    if re.search(r"@|\d{3,}|\$|invoice|date|payment", following, re.I):
+                    following = clean_customer_candidate(following)
+                    if re.search(r"@|\d{3,}|\$|payment", following, re.I):
                         continue
                     if looks_like_customer_name(following):
                         return following
@@ -243,7 +273,12 @@ def extract_customer(text: str) -> str | None:
     return None
 
 
+def clean_customer_candidate(line: str) -> str:
+    return re.split(r"\b(?:Invoice Date|Due Date|Terms|Invoice #|Balance Due)\b\s*:?", line, maxsplit=1, flags=re.I)[0].strip()
+
+
 def looks_like_customer_name(line: str) -> bool:
+    line = clean_customer_candidate(line)
     if not line or re.search(r"@|\$|invoice|date|subtotal|total|quantity|unit price|charge|payment|method", line, re.I):
         return False
     return bool(re.search(r"(LLC|L\.L\.C\.|Inc\.?|Corporation|Corp\.?|Technologies|Systems|Services)\b", line, re.I))
