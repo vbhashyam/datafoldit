@@ -59,7 +59,9 @@ def main() -> None:
     conn = db.connect(db_path)
     db.init_db(conn)
     source = Path(args.import_xlsx) if args.import_xlsx else DEFAULT_SOURCE_XLSX
-    if args.import_xlsx or (db.is_empty(conn) and source.exists()):
+    auto_import = os.environ.get("DATAFOLDIT_AUTO_IMPORT", "1").strip().lower()
+    auto_import_enabled = auto_import not in {"0", "false", "no", "off"}
+    if args.import_xlsx or (auto_import_enabled and db.is_empty(conn) and source.exists()):
         counts = import_company_workbook(conn, source, replace=args.replace or db.is_empty(conn))
         print(f"Imported workbook: {source}")
         print(", ".join(f"{key}={value}" for key, value in counts.items()))
