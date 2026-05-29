@@ -1048,9 +1048,9 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     </div>
     """
     extract_form = """
-    <form method="post" action="/invoices/extract" enctype="multipart/form-data" class="form-grid">
+    <form method="post" action="/invoices/extract" enctype="multipart/form-data" class="form-grid" data-auto-upload-form>
       <label class="span-4">Invoice file
-        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic">
+        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic" data-auto-submit-file>
       </label>
       <label class="span-4">PDF path
         <input type="text" name="pdf_path" placeholder="/Users/vamsikrishnabhashyam/Downloads/invoice.pdf">

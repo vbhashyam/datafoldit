@@ -32,6 +32,30 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[data-auto-upload-form]").forEach(function (uploadForm) {
+      var fileInput = uploadForm.querySelector("[data-auto-submit-file]");
+      var submitButton = uploadForm.querySelector('button[type="submit"]');
+      function markSubmitting() {
+        if (submitButton) {
+          submitButton.disabled = true;
+          submitButton.textContent = "Reading invoice...";
+        }
+      }
+      uploadForm.addEventListener("submit", markSubmitting);
+      if (fileInput) {
+        fileInput.addEventListener("change", function () {
+          if (fileInput.files && fileInput.files.length > 0) {
+            markSubmitting();
+            if (uploadForm.requestSubmit) {
+              uploadForm.requestSubmit();
+            } else {
+              uploadForm.submit();
+            }
+          }
+        });
+      }
+    });
+
     var form = document.querySelector("[data-payroll-form]");
     if (!form) {
       return;
