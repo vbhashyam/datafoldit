@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import db
+from .transaction_import import extract_docx_text, extract_xlsx_text
 
 
 MONEY_RE = re.compile(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2}))")
@@ -37,6 +38,9 @@ def extract_invoice_from_pdf(pdf_path: str | Path) -> dict[str, Any]:
 
 
 def extract_text(pdf_path: Path) -> str:
+    text = extract_structured_file_text(pdf_path)
+    if useful_text(text):
+        return text
     text = extract_text_with_image_ocr(pdf_path) if is_image_file(pdf_path) else ""
     if useful_text(text):
         return text
@@ -48,6 +52,20 @@ def extract_text(pdf_path: Path) -> str:
             "Could not extract readable invoice text. Install tesseract plus poppler-utils, or use macOS Quick Look locally."
         )
     return text
+
+
+def extract_structured_file_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".xlsx", ".xlsm"}:
+            return extract_xlsx_text(path)
+        if suffix == ".docx":
+            return extract_docx_text(path)
+        if suffix in {".txt", ".csv", ".tsv"}:
+            return path.read_text(errors="replace")
+    except Exception:
+        return ""
+    return ""
 
 
 def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:

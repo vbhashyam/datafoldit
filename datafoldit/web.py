@@ -23,6 +23,7 @@ from .invoice_pdf import extract_invoice_from_pdf
 from .transaction_import import extract_transaction_from_file
 
 
+FileInfo = dict[str, bytes | str]
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_DATA_DIR = Path(os.environ.get("DATAFOLDIT_DATA_DIR", ROOT / "data")).expanduser()
@@ -163,21 +164,35 @@ def make_handler(db_path: Path):
             try:
                 if parsed.path == "/bank/extract":
                     fields, files = self.read_multipart_form()
-                    saved_path = save_uploaded_file(files.get("attachment"))
+                    saved_path = save_uploaded_file(first_uploaded_file(files.get("attachment")))
                     extracted = extract_transaction_from_file(saved_path)
                     self.send_html(render_transaction_review(self.conn, extracted, "Review extracted transaction before saving"))
                     return
                 if parsed.path == "/invoices/extract":
                     if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
                         upload_fields, files = self.read_multipart_form()
-                        uploaded = files.get("attachment")
-                        source_path = str(save_uploaded_file(uploaded)) if uploaded and uploaded.get("content") else upload_fields.get("pdf_path", "")
+                        uploaded_files = uploaded_file_list(files.get("attachment"))
+                        if uploaded_files:
+                            source_paths = [save_uploaded_file(uploaded) for uploaded in uploaded_files]
+                            if len(source_paths) == 1:
+                                extracted = extract_invoice_from_pdf(source_paths[0])
+                                self.send_html(render_invoice_review(self.conn, extracted, "Review extracted invoice fields before saving"))
+                            else:
+                                extracted_rows = extract_invoice_batch(source_paths)
+                                self.send_html(render_invoice_bulk_review(self.conn, extracted_rows, "Review extracted invoice fields before saving"))
+                            return
+                        source_path = upload_fields.get("pdf_path", "")
                     else:
                         source_path = flatten_form(self.read_form()).get("pdf_path", "")
                     if not source_path:
                         raise ValueError("Upload an invoice file or enter a PDF path")
                     extracted = extract_invoice_from_pdf(source_path)
                     self.send_html(render_invoice_review(self.conn, extracted, "Review extracted invoice fields before saving"))
+                    return
+                if parsed.path == "/invoices/create-bulk":
+                    saved_count = add_invoice_batch(self.conn, self.read_form())
+                    self.conn.commit()
+                    self.redirect(f"/invoices?flash={quote(f'{saved_count} invoices saved')}")
                     return
                 fields = self.read_fields_with_optional_attachment()
                 if parsed.path == "/bank/create":
@@ -248,7 +263,7 @@ def make_handler(db_path: Path):
             body = self.rfile.read(length).decode("utf-8")
             return parse_qs(body, keep_blank_values=True)
 
-        def read_multipart_form(self) -> tuple[dict[str, str], dict[str, dict[str, bytes | str]]]:
+        def read_multipart_form(self) -> tuple[dict[str, str], dict[str, list[FileInfo]]]:
             content_type = self.headers.get("Content-Type", "")
             if not content_type.startswith("multipart/form-data"):
                 raise ValueError("Upload form must use multipart/form-data")
@@ -258,7 +273,7 @@ def make_handler(db_path: Path):
                 b"Content-Type: " + content_type.encode("utf-8") + b"\r\nMIME-Version: 1.0\r\n\r\n" + body
             )
             fields: dict[str, str] = {}
-            files: dict[str, dict[str, bytes | str]] = {}
+            files: dict[str, list[FileInfo]] = {}
             for part in message.iter_parts():
                 if part.get_content_disposition() != "form-data":
                     continue
@@ -268,11 +283,13 @@ def make_handler(db_path: Path):
                 filename = part.get_filename()
                 payload = part.get_payload(decode=True) or b""
                 if filename:
-                    files[name] = {
-                        "filename": filename,
-                        "content": payload,
-                        "content_type": part.get_content_type(),
-                    }
+                    files.setdefault(name, []).append(
+                        {
+                            "filename": filename,
+                            "content": payload,
+                            "content_type": part.get_content_type(),
+                        }
+                    )
                 else:
                     charset = part.get_content_charset() or "utf-8"
                     fields[name] = payload.decode(charset, errors="replace").strip()
@@ -281,7 +298,7 @@ def make_handler(db_path: Path):
         def read_fields_with_optional_attachment(self) -> dict[str, str]:
             if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
                 fields, files = self.read_multipart_form()
-                saved_path = save_optional_uploaded_file(files.get("attachment"))
+                saved_path = save_optional_uploaded_file(first_uploaded_file(files.get("attachment")))
                 if saved_path:
                     fields["attachment_path"] = str(saved_path)
                 return {key: value for key, value in fields.items() if value.strip() != ""}
@@ -628,7 +645,71 @@ def invoice_filter_form(conn, filters: dict[str, str]) -> str:
     """
 
 
-def save_uploaded_file(file_info: dict[str, bytes | str] | None) -> Path:
+def uploaded_file_list(files: list[FileInfo] | None) -> list[FileInfo]:
+    return [file_info for file_info in (files or []) if file_info.get("content")]
+
+
+def first_uploaded_file(files: list[FileInfo] | None) -> FileInfo | None:
+    uploaded = uploaded_file_list(files)
+    return uploaded[0] if uploaded else None
+
+
+def extract_invoice_batch(paths: list[Path]) -> list[dict]:
+    extracted_rows: list[dict] = []
+    for path in paths:
+        try:
+            extracted = extract_invoice_from_pdf(path)
+            extracted["_ok"] = True
+            extracted["_source_name"] = path.name
+            extracted_rows.append(extracted)
+        except Exception as exc:
+            extracted_rows.append(
+                {
+                    "_ok": False,
+                    "_source_name": path.name,
+                    "source_pdf": str(path),
+                    "error": str(exc),
+                }
+            )
+    return extracted_rows
+
+
+def add_invoice_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) -> int:
+    try:
+        row_count = int(form_value(fields, "row_count") or "0")
+    except ValueError:
+        row_count = 0
+    saved_count = 0
+    for index in range(row_count):
+        if form_value(fields, f"include_{index}").lower() not in {"on", "1", "yes"}:
+            continue
+        payload = {
+            "date": form_value(fields, f"date_{index}"),
+            "invoice_number": form_value(fields, f"invoice_number_{index}"),
+            "customer": form_value(fields, f"customer_{index}"),
+            "amount": form_value(fields, f"amount_{index}"),
+            "due_date": form_value(fields, f"due_date_{index}"),
+            "status": form_value(fields, f"status_{index}"),
+            "balance_due": form_value(fields, f"balance_due_{index}"),
+            "source_pdf": form_value(fields, f"source_pdf_{index}"),
+        }
+        if not any(payload.get(key) for key in ("invoice_number", "customer", "amount")):
+            continue
+        db.add_invoice(conn, payload)
+        saved_count += 1
+    if saved_count == 0:
+        raise ValueError("Select at least one invoice to save")
+    return saved_count
+
+
+def form_value(fields: dict[str, list[str]], key: str) -> str:
+    values = fields.get(key)
+    if not values:
+        return ""
+    return values[0].strip()
+
+
+def save_uploaded_file(file_info: FileInfo | None) -> Path:
     if not file_info or not file_info.get("content"):
         raise ValueError("Choose an attachment to import")
     content = file_info["content"]
@@ -640,11 +721,15 @@ def save_uploaded_file(file_info: dict[str, bytes | str] | None) -> Path:
     original_name = safe_filename(str(file_info.get("filename") or "attachment"))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     target = UPLOAD_DIR / f"{stamp}-{original_name}"
+    counter = 1
+    while target.exists():
+        target = UPLOAD_DIR / f"{stamp}-{counter}-{original_name}"
+        counter += 1
     target.write_bytes(content)
     return target
 
 
-def save_optional_uploaded_file(file_info: dict[str, bytes | str] | None) -> Path | None:
+def save_optional_uploaded_file(file_info: FileInfo | None) -> Path | None:
     if not file_info or not file_info.get("content"):
         return None
     return save_uploaded_file(file_info)
@@ -665,9 +750,12 @@ def content_type_for(path: Path) -> str:
         ".webp": "image/webp",
         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ".xls": "application/vnd.ms-excel",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".doc": "application/msword",
         ".txt": "text/plain; charset=utf-8",
         ".csv": "text/csv; charset=utf-8",
+        ".tsv": "text/tab-separated-values; charset=utf-8",
     }.get(suffix, "application/octet-stream")
 
 
@@ -732,7 +820,7 @@ def layout(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{esc(title)} · DataFold IT</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v={static_version("styles.css")}">
   <script src="/static/app.js?v={static_version("app.js")}" defer></script>
 </head>
 <body>
@@ -797,7 +885,7 @@ def login_page(error: str | None = None) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in · DataFold IT</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v={static_version("styles.css")}">
 </head>
 <body class="login-page">
   <form class="login-card" method="post" action="/login">
@@ -1123,8 +1211,16 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
 INVOICE_STATUS_OPTIONS = ["Received", "Not Received", "Void"]
 
 
+def invoice_status_options_html(selected: str | None = None) -> str:
+    selected = selected or "Not Received"
+    return "".join(
+        f'<option value="{esc(option)}"{" selected" if selected == option else ""}>{esc(option)}</option>'
+        for option in INVOICE_STATUS_OPTIONS
+    )
+
+
 def invoice_status_select(selected: str | None = None) -> str:
-    return select_field("status", "Status", INVOICE_STATUS_OPTIONS, selected=selected or "Not Received", required=True)
+    return f'<label>Status<select name="status" required>{invoice_status_options_html(selected)}</select></label>'
 
 
 def invoice_status_choice(status: str | None, received: str | None = None, is_void: str | int | bool | None = None) -> str:
@@ -1143,14 +1239,10 @@ def invoice_status_label(row) -> str:
 
 def invoice_status_inline_control(row) -> str:
     selected = invoice_status_label(row)
-    options = "".join(
-        f'<option value="{esc(option)}"{" selected" if selected == option else ""}>{esc(option)}</option>'
-        for option in INVOICE_STATUS_OPTIONS
-    )
     return f"""
     <form class="inline-status-form" method="post" action="/invoices/status" data-inline-status-form>
       <input type="hidden" name="invoice_id" value="{esc(row["id"])}">
-      <select name="status" aria-label="Invoice status">{options}</select>
+      <select name="status" aria-label="Invoice status">{invoice_status_options_html(selected)}</select>
     </form>
     """
 
@@ -1192,13 +1284,13 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     """
     extract_form = """
     <form method="post" action="/invoices/extract" enctype="multipart/form-data" class="form-grid" data-auto-upload-form>
-      <label class="span-4">Invoice file
-        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic" data-auto-submit-file>
+      <label class="span-4">Invoice files
+        <input type="file" name="attachment" multiple data-auto-submit-file>
       </label>
-      <label class="span-4">PDF path
+      <label class="span-4">File path
         <input type="text" name="pdf_path" placeholder="/Users/vamsikrishnabhashyam/Downloads/invoice.pdf">
       </label>
-      <div class="span-4 actions"><button class="button secondary" type="submit">Read invoice and review</button></div>
+      <div class="span-4 actions"><button class="button secondary" type="submit">Read invoice file(s) and review</button></div>
     </form>
     """
     form = f"""
@@ -1234,7 +1326,7 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     )
     extract_panel = f'<div class="panel-body">{extract_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
-    content = section_stack(kpis, panel("Read Invoice PDF", extract_panel), panel("New Invoice", form_panel), panel("Invoice Ledger", table))
+    content = section_stack(kpis, panel("Read Invoice Files", extract_panel), panel("New Invoice", form_panel), panel("Invoice Ledger", table))
     return layout(conn, "Invoices", "Receivables", "/invoices", content, flash, invoice_filter_form(conn, filters))
 
 
@@ -1269,6 +1361,101 @@ def render_invoice_review(conn, extracted: dict, flash: str | None = None) -> st
     excerpt_panel = f'<div class="panel-body">{excerpt}</div>'
     content = section_stack(panel("Review Extracted Invoice", form_panel), panel("OCR Text Excerpt", excerpt_panel))
     return layout(conn, "Invoice PDF Review", "Review", "/invoices", content, flash)
+
+
+def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | None = None) -> str:
+    fallback_numbers = invoice_number_sequence(db.next_invoice_number(conn), len(extracted_rows))
+    fallback_index = 0
+    form_index = 0
+    rows_html = []
+    for extracted in extracted_rows:
+        source_pdf = extracted.get("source_pdf") or ""
+        source_name = extracted.get("_source_name") or Path(source_pdf).name or "Uploaded file"
+        source_html = attachment_link(source_pdf) or esc(source_name)
+        if not extracted.get("_ok"):
+            rows_html.append(
+                f"""
+                <tr class="bulk-error-row">
+                  <td></td>
+                  <td>{source_html}</td>
+                  <td colspan="7"><strong>Could not read this file.</strong> {esc(extracted.get("error") or "")}</td>
+                </tr>
+                """
+            )
+            continue
+        invoice_number = extracted.get("invoice_number") or fallback_numbers[fallback_index]
+        fallback_index += 1
+        status = invoice_status_choice(extracted.get("status"), extracted.get("received"), extracted.get("is_void"))
+        rows_html.append(
+            f"""
+            <tr>
+              <td><input class="bulk-check" type="checkbox" name="include_{form_index}" aria-label="Save {esc(source_name)}" checked></td>
+              <td>{source_html}<input type="hidden" name="source_pdf_{form_index}" value="{esc(source_pdf)}"></td>
+              <td>{bulk_input(f"date_{form_index}", "Date", "date", extracted.get("date"), required=True)}</td>
+              <td>{bulk_input(f"invoice_number_{form_index}", "Invoice number", "text", invoice_number, required=True)}</td>
+              <td>{bulk_input(f"customer_{form_index}", "Customer", "text", extracted.get("customer"), required=True)}</td>
+              <td><select name="status_{form_index}" aria-label="Status">{invoice_status_options_html(status)}</select></td>
+              <td>{bulk_input(f"due_date_{form_index}", "Due date", "date", extracted.get("due_date"))}</td>
+              <td>{bulk_input(f"amount_{form_index}", "Amount", "number", currency_input(extracted.get("amount")), step="0.01", required=True)}</td>
+              <td>{bulk_input(f"balance_due_{form_index}", "Balance due", "number", currency_input(extracted.get("balance_due")), step="0.01")}</td>
+            </tr>
+            """
+        )
+        form_index += 1
+    disabled = " disabled" if form_index == 0 else ""
+    table = f"""
+    <form method="post" action="/invoices/create-bulk" class="bulk-review-form">
+      <input type="hidden" name="row_count" value="{form_index}">
+      <div class="table-wrap">
+        <table class="bulk-review-table">
+          <thead>
+            <tr>
+              <th>Save</th>
+              <th>File</th>
+              <th>Date</th>
+              <th>Invoice #</th>
+              <th>Customer</th>
+              <th>Status</th>
+              <th>Due Date</th>
+              <th>Amount</th>
+              <th>Balance Due</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(rows_html)}</tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="button" type="submit"{disabled}>Save selected invoices</button>
+        <a class="button secondary" href="/invoices">Cancel</a>
+      </div>
+    </form>
+    """
+    content = section_stack(panel("Bulk Invoice Review", f'<div class="panel-body">{table}</div>'))
+    return layout(conn, "Bulk Invoice Review", "Review", "/invoices", content, flash)
+
+
+def bulk_input(
+    name: str,
+    label: str,
+    input_type: str,
+    value: str | None = None,
+    required: bool = False,
+    step: str | None = None,
+) -> str:
+    value_attr = f' value="{esc(value)}"' if value is not None else ""
+    required_attr = " required" if required else ""
+    step_attr = f' step="{esc(step)}"' if step else ""
+    return f'<input type="{esc(input_type)}" name="{esc(name)}" aria-label="{esc(label)}"{value_attr}{step_attr}{required_attr}>'
+
+
+def invoice_number_sequence(first_number: str, count: int) -> list[str]:
+    match = re.match(r"^(.*?)(\d+)$", first_number or "")
+    if not match:
+        return [first_number or f"INV-{index + 1:06d}" for index in range(count)]
+    prefix, digits = match.groups()
+    start = int(digits)
+    width = len(digits)
+    return [f"{prefix}{start + index:0{width}d}" for index in range(count)]
 
 
 def render_reports(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:

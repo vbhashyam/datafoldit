@@ -38,7 +38,8 @@
       function markSubmitting() {
         if (submitButton) {
           submitButton.disabled = true;
-          submitButton.textContent = "Reading invoice...";
+          var count = fileInput && fileInput.files ? fileInput.files.length : 1;
+          submitButton.textContent = count > 1 ? "Reading invoices..." : "Reading invoice...";
         }
       }
       uploadForm.addEventListener("submit", markSubmitting);

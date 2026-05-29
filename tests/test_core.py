@@ -8,7 +8,7 @@ from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
 from datafoldit.transaction_import import parse_transaction_text
-from datafoldit.web import filter_invoice_rows, filter_rows_by_period
+from datafoldit.web import add_invoice_batch, filter_invoice_rows, filter_rows_by_period, render_invoice_bulk_review, render_invoices
 
 
 class DataFoldCoreTests(unittest.TestCase):
@@ -259,6 +259,63 @@ class DataFoldCoreTests(unittest.TestCase):
             ("INV-STATUS-002",),
         ).fetchone()
         self.assertEqual(deleted["count"], 0)
+
+    def test_invoice_upload_accepts_multiple_file_types(self):
+        html = render_invoices(self.conn)
+        self.assertIn('type="file" name="attachment" multiple', html)
+        self.assertIn("Read Invoice Files", html)
+        self.assertNotIn("accept=", html)
+
+    def test_bulk_invoice_review_and_save_selected_rows(self):
+        html = render_invoice_bulk_review(
+            self.conn,
+            [
+                {
+                    "_ok": True,
+                    "_source_name": "invoice-a.csv",
+                    "source_pdf": "/tmp/invoice-a.csv",
+                    "date": "2026-05-29",
+                    "invoice_number": "INV-BULK-001",
+                    "customer": "Bulk Client LLC",
+                    "amount": 1250,
+                    "balance_due": 1250,
+                    "status": "Open",
+                },
+                {
+                    "_ok": False,
+                    "_source_name": "bad-file.bin",
+                    "source_pdf": "/tmp/bad-file.bin",
+                    "error": "Could not read enough text",
+                },
+            ],
+        )
+        self.assertIn('action="/invoices/create-bulk"', html)
+        self.assertIn('name="row_count" value="1"', html)
+        self.assertIn("Could not read this file.", html)
+        saved = add_invoice_batch(
+            self.conn,
+            {
+                "row_count": ["2"],
+                "include_0": ["on"],
+                "date_0": ["2026-05-29"],
+                "invoice_number_0": ["INV-BULK-001"],
+                "customer_0": ["Bulk Client LLC"],
+                "amount_0": ["1250"],
+                "due_date_0": ["2026-06-29"],
+                "status_0": ["Not Received"],
+                "balance_due_0": ["1250"],
+                "source_pdf_0": ["/tmp/invoice-a.csv"],
+                "date_1": ["2026-05-29"],
+                "invoice_number_1": ["INV-BULK-002"],
+                "customer_1": ["Skipped LLC"],
+                "amount_1": ["500"],
+            },
+        )
+        self.assertEqual(saved, 1)
+        rows = self.conn.execute("SELECT invoice_number, source_pdf FROM invoices WHERE invoice_number LIKE 'INV-BULK-%'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["invoice_number"], "INV-BULK-001")
+        self.assertEqual(rows[0]["source_pdf"], "/tmp/invoice-a.csv")
 
 
 if __name__ == "__main__":
