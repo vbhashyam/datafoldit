@@ -308,9 +308,7 @@ def commission_fraction(pct: float) -> float:
 def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     invoice_date = normalize_date(payload.get("date")) or date.today().isoformat()
     amount = amount_value(payload.get("amount"))
-    status = clean_text(payload.get("status")) or "Open"
-    is_void = bool_value(payload.get("is_void")) or status.upper() == "VOID"
-    received = clean_text(payload.get("received"))
+    status, received, is_void = normalize_invoice_status(payload)
     balance_due = amount_value(payload.get("balance_due"))
     if status.lower() == "paid" or str(received).upper() == "Y" or is_void:
         balance_due = 0.0
@@ -338,6 +336,36 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     entity_id = int(cur.lastrowid)
     audit(conn, "create", "invoice", entity_id, payload)
     return entity_id
+
+
+def normalize_invoice_status(payload: dict[str, Any]) -> tuple[str, str, bool]:
+    raw_status = clean_text(payload.get("status")) or ""
+    received = clean_text(payload.get("received")) or ""
+    is_void = bool_value(payload.get("is_void"))
+    normalized = raw_status.strip().lower().replace("_", " ")
+
+    if normalized in {"void", "voided"}:
+        return "VOID", "N", True
+
+    if normalized in {"received", "paid", "yes", "y"}:
+        return "Paid", "Y", False
+
+    if normalized in {"not received", "notreceived", "unpaid", "no", "n"}:
+        return "Open", "N", False
+
+    if raw_status.upper() == "VOID":
+        return "VOID", "N", True
+
+    if is_void:
+        return "VOID", "N", True
+
+    if received.upper() == "Y":
+        return "Paid", "Y", is_void
+
+    status = raw_status or "Open"
+    if not received:
+        received = "N"
+    return status, received.upper(), is_void
 
 
 def next_invoice_number(conn: sqlite3.Connection) -> str:
