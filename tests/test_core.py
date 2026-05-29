@@ -231,6 +231,24 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(rows["INV-STATUS-003"]["received"], "N")
         self.assertEqual(rows["INV-STATUS-003"]["is_void"], 1)
         self.assertEqual(rows["INV-STATUS-003"]["status"], "VOID")
+        db.update_invoice_status(self.conn, rows["INV-STATUS-002"]["id"], "Received")
+        updated = self.conn.execute(
+            "SELECT status, received, is_void, balance_due FROM invoices WHERE invoice_number = ?",
+            ("INV-STATUS-002",),
+        ).fetchone()
+        self.assertEqual(updated["status"], "Paid")
+        self.assertEqual(updated["received"], "Y")
+        self.assertEqual(updated["is_void"], 0)
+        self.assertAlmostEqual(updated["balance_due"], 0.0, places=2)
+        db.update_invoice_status(self.conn, rows["INV-STATUS-002"]["id"], "Void")
+        voided = self.conn.execute(
+            "SELECT status, received, is_void, balance_due FROM invoices WHERE invoice_number = ?",
+            ("INV-STATUS-002",),
+        ).fetchone()
+        self.assertEqual(voided["status"], "VOID")
+        self.assertEqual(voided["received"], "N")
+        self.assertEqual(voided["is_void"], 1)
+        self.assertAlmostEqual(voided["balance_due"], 0.0, places=2)
 
 
 if __name__ == "__main__":
