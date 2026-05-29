@@ -1043,13 +1043,34 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     return layout(conn, "Payroll", "Payroll", "/payroll", content, flash, payroll_filter_form(conn, filters))
 
 
+INVOICE_STATUS_OPTIONS = ["Not Received", "Received", "Void"]
+
+
+def invoice_status_select(selected: str | None = None) -> str:
+    return select_field("status", "Status", INVOICE_STATUS_OPTIONS, selected=selected or "Not Received", required=True)
+
+
+def invoice_status_choice(status: str | None, received: str | None = None, is_void: str | int | bool | None = None) -> str:
+    status_value = str(status or "").strip().lower()
+    received_value = str(received or "").strip().upper()
+    if db.bool_value(is_void) or status_value in {"void", "voided"}:
+        return "Void"
+    if status_value in {"received", "paid"} or received_value == "Y":
+        return "Received"
+    return "Not Received"
+
+
+def invoice_status_label(row) -> str:
+    return invoice_status_choice(row["status"], row["received"], row["is_void"])
+
+
 def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
     rows = filter_rows_by_period(db.rows_for_table(conn, "invoices"), "date", filters)
     next_number = db.next_invoice_number(conn)
     active_rows = [row for row in rows if not row["is_void"]]
     invoice_total = sum(db.amount_value(row["amount"]) for row in active_rows)
-    invoice_paid = sum(db.amount_value(row["amount"]) for row in active_rows if str(row["status"] or "").lower() == "paid")
+    invoice_paid = sum(db.amount_value(row["amount"]) for row in active_rows if invoice_status_label(row) == "Received")
     invoice_outstanding = sum(db.amount_value(row["balance_due"]) for row in active_rows)
     scope = period_label(filters)
     kpis = f"""
@@ -1078,32 +1099,30 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
       {input_field("customer", "Customer / Client", "text", required=True)}
       {input_field("amount", "Amount", "number", step="0.01", required=True)}
       {input_field("due_date", "Due Date", "date")}
-      {select_field("status", "Status", ["Open", "Sent", "Paid", "Overdue", "VOID"], required=True)}
-      {select_field("received", "Received", ["N", "Y", "-"])}
+      {invoice_status_select()}
       {input_field("balance_due", "Balance Due", "number", step="0.01")}
-      <label><span>Void?</span><select name="is_void"><option value="">No</option><option value="Y">Yes</option></select></label>
       <div class="span-4 actions"><button class="button" type="submit">Save invoice</button></div>
     </form>
     """
     table = render_table(
-        ["Date", "Invoice #", "Customer", "Void?", "Received", "Due Date", "Amount", "Status", "Balance Due", "Attachment"],
+        ["Date", "Invoice #", "Customer", "Status", "Received", "Void?", "Due Date", "Amount", "Balance Due", "Attachment"],
         [
             [
                 row["date"],
                 row["invoice_number"],
                 row["customer"],
+                invoice_status_label(row),
+                row["received"] or "N",
                 "Y" if row["is_void"] else "",
-                row["received"],
                 row["due_date"],
                 money(row["amount"]),
-                row["status"],
                 money(row["balance_due"]),
                 attachment_link(row["source_pdf"] if "source_pdf" in row.keys() else None),
             ]
             for row in rows
         ],
         raw_columns={9},
-        money_columns={6, 8},
+        money_columns={7, 8},
     )
     extract_panel = f'<div class="panel-body">{extract_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -1122,8 +1141,7 @@ def render_invoice_review(conn, extracted: dict, flash: str | None = None) -> st
       {input_field("customer", "Customer / Client", "text", value=extracted.get("customer"), required=True)}
       {input_field("amount", "Amount", "number", value=currency_input(extracted.get("amount")), step="0.01", required=True)}
       {input_field("due_date", "Due Date", "date", value=extracted.get("due_date"))}
-      {select_field("status", "Status", ["Open", "Sent", "Paid", "Overdue", "VOID"], selected=extracted.get("status") or "Open", required=True)}
-      {select_field("received", "Received", ["N", "Y", "-"], selected=extracted.get("received") or "N")}
+      {invoice_status_select(invoice_status_choice(extracted.get("status"), extracted.get("received"), extracted.get("is_void")))}
       {input_field("balance_due", "Balance Due", "number", value=currency_input(extracted.get("balance_due")), step="0.01")}
       <input type="hidden" name="source_pdf" value="{esc(source_pdf)}">
       <div class="span-4 actions">

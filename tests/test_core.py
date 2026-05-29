@@ -187,6 +187,51 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertAlmostEqual(parsed["amount"], 11440.00, places=2)
         self.assertAlmostEqual(parsed["balance_due"], 11440.00, places=2)
 
+    def test_invoice_status_dropdown_values_map_to_received_and_void(self):
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "invoice_number": "INV-STATUS-001",
+                "customer": "Acme LLC",
+                "amount": "100",
+                "status": "Received",
+            },
+        )
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "invoice_number": "INV-STATUS-002",
+                "customer": "Beta LLC",
+                "amount": "200",
+                "status": "Not Received",
+            },
+        )
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "invoice_number": "INV-STATUS-003",
+                "customer": "Void LLC",
+                "amount": "300",
+                "status": "Void",
+            },
+        )
+        rows = {
+            row["invoice_number"]: row
+            for row in self.conn.execute("SELECT * FROM invoices WHERE invoice_number LIKE 'INV-STATUS-%'")
+        }
+        self.assertEqual(rows["INV-STATUS-001"]["received"], "Y")
+        self.assertEqual(rows["INV-STATUS-001"]["is_void"], 0)
+        self.assertEqual(rows["INV-STATUS-001"]["status"], "Paid")
+        self.assertEqual(rows["INV-STATUS-002"]["received"], "N")
+        self.assertEqual(rows["INV-STATUS-002"]["is_void"], 0)
+        self.assertEqual(rows["INV-STATUS-002"]["status"], "Open")
+        self.assertEqual(rows["INV-STATUS-003"]["received"], "N")
+        self.assertEqual(rows["INV-STATUS-003"]["is_void"], 1)
+        self.assertEqual(rows["INV-STATUS-003"]["status"], "VOID")
+
 
 if __name__ == "__main__":
     unittest.main()
