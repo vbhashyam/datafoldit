@@ -54,6 +54,16 @@
       }
     });
 
+    document.querySelectorAll("[data-inline-status-form]").forEach(function (statusForm) {
+      var statusSelect = statusForm.querySelector('select[name="status"]');
+      if (statusSelect) {
+        statusSelect.addEventListener("change", function () {
+          statusSelect.disabled = true;
+          statusForm.submit();
+        });
+      }
+    });
+
     var form = document.querySelector("[data-payroll-form]");
     if (!form) {
       return;

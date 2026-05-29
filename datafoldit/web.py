@@ -196,6 +196,10 @@ def make_handler(db_path: Path):
                     db.add_invoice(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/invoices?flash=Invoice+saved")
+                elif parsed.path == "/invoices/status":
+                    db.update_invoice_status(self.conn, int(fields.get("invoice_id") or 0), fields.get("status") or "")
+                    self.conn.commit()
+                    self.redirect(self.headers.get("Referer", "/invoices"))
                 elif parsed.path == "/import":
                     path = fields.get("workbook_path") or str(DEFAULT_SOURCE_XLSX)
                     counts = import_company_workbook(self.conn, path, replace=bool(fields.get("replace")))
@@ -1043,7 +1047,7 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     return layout(conn, "Payroll", "Payroll", "/payroll", content, flash, payroll_filter_form(conn, filters))
 
 
-INVOICE_STATUS_OPTIONS = ["Not Received", "Received", "Void"]
+INVOICE_STATUS_OPTIONS = ["Received", "Not Received", "Void"]
 
 
 def invoice_status_select(selected: str | None = None) -> str:
@@ -1062,6 +1066,20 @@ def invoice_status_choice(status: str | None, received: str | None = None, is_vo
 
 def invoice_status_label(row) -> str:
     return invoice_status_choice(row["status"], row["received"], row["is_void"])
+
+
+def invoice_status_inline_control(row) -> str:
+    selected = invoice_status_label(row)
+    options = "".join(
+        f'<option value="{esc(option)}"{" selected" if selected == option else ""}>{esc(option)}</option>'
+        for option in INVOICE_STATUS_OPTIONS
+    )
+    return f"""
+    <form class="inline-status-form" method="post" action="/invoices/status" data-inline-status-form>
+      <input type="hidden" name="invoice_id" value="{esc(row["id"])}">
+      <select name="status" aria-label="Invoice status">{options}</select>
+    </form>
+    """
 
 
 def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
@@ -1105,15 +1123,13 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     </form>
     """
     table = render_table(
-        ["Date", "Invoice #", "Customer", "Status", "Received", "Void?", "Due Date", "Amount", "Balance Due", "Attachment"],
+        ["Date", "Invoice #", "Customer", "Status", "Due Date", "Amount", "Balance Due", "Attachment"],
         [
             [
                 row["date"],
                 row["invoice_number"],
                 row["customer"],
-                invoice_status_label(row),
-                row["received"] or "N",
-                "Y" if row["is_void"] else "",
+                invoice_status_inline_control(row),
                 row["due_date"],
                 money(row["amount"]),
                 money(row["balance_due"]),
@@ -1121,8 +1137,8 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             ]
             for row in rows
         ],
-        raw_columns={9},
-        money_columns={7, 8},
+        raw_columns={3, 7},
+        money_columns={5, 6},
     )
     extract_panel = f'<div class="panel-body">{extract_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'

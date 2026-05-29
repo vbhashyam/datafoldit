@@ -338,6 +338,23 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     return entity_id
 
 
+def update_invoice_status(conn: sqlite3.Connection, invoice_id: int, status_value: str) -> None:
+    row = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    if row is None:
+        raise ValueError("Invoice was not found")
+    status, received, is_void = normalize_invoice_status({"status": status_value})
+    balance_due = 0.0 if received == "Y" or is_void else amount_value(row["amount"])
+    conn.execute(
+        """
+        UPDATE invoices
+        SET status = ?, received = ?, is_void = ?, balance_due = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, received, 1 if is_void else 0, balance_due, invoice_id),
+    )
+    audit(conn, "update_status", "invoice", invoice_id, {"status": status_value})
+
+
 def normalize_invoice_status(payload: dict[str, Any]) -> tuple[str, str, bool]:
     raw_status = clean_text(payload.get("status")) or ""
     received = clean_text(payload.get("received")) or ""
