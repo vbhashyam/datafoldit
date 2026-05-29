@@ -64,6 +64,15 @@
       }
     });
 
+    document.querySelectorAll("[data-confirm-message]").forEach(function (confirmForm) {
+      confirmForm.addEventListener("submit", function (event) {
+        var message = confirmForm.getAttribute("data-confirm-message") || "Are you sure?";
+        if (!window.confirm(message)) {
+          event.preventDefault();
+        }
+      });
+    });
+
     var form = document.querySelector("[data-payroll-form]");
     if (!form) {
       return;

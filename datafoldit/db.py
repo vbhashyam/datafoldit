@@ -355,6 +355,14 @@ def update_invoice_status(conn: sqlite3.Connection, invoice_id: int, status_valu
     audit(conn, "update_status", "invoice", invoice_id, {"status": status_value})
 
 
+def delete_invoice(conn: sqlite3.Connection, invoice_id: int) -> None:
+    row = conn.execute("SELECT invoice_number FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    if row is None:
+        raise ValueError("Invoice was not found")
+    conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+    audit(conn, "delete", "invoice", invoice_id, {"invoice_number": row["invoice_number"]})
+
+
 def normalize_invoice_status(payload: dict[str, Any]) -> tuple[str, str, bool]:
     raw_status = clean_text(payload.get("status")) or ""
     received = clean_text(payload.get("received")) or ""
