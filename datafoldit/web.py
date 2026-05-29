@@ -127,6 +127,10 @@ def make_handler(db_path: Path):
             filters = date_filter_from_query(query)
             if path == "/":
                 self.send_html(render_dashboard(self.conn, flash))
+            elif path == "/bank/extract":
+                self.redirect("/bank")
+            elif path == "/invoices/extract":
+                self.redirect("/invoices")
             elif path == "/bank":
                 self.send_html(render_bank(self.conn, flash, filters))
             elif path == "/expenses":
@@ -314,6 +318,7 @@ def make_handler(db_path: Path):
             )
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
@@ -651,7 +656,7 @@ def layout(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{esc(title)} · DataFold IT</title>
   <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v={static_version("app.js")}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -697,6 +702,14 @@ def layout(
   </div>
 </body>
 </html>"""
+
+
+def static_version(filename: str) -> str:
+    path = STATIC_DIR / filename
+    try:
+        return str(int(path.stat().st_mtime))
+    except OSError:
+        return "1"
 
 
 def login_page(error: str | None = None) -> str:
