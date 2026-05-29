@@ -265,6 +265,11 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn('type="file" name="attachment" multiple', html)
         self.assertIn("Read Invoice Files", html)
         self.assertNotIn("accept=", html)
+        self.assertIn('class="grid cols-3"', html)
+        self.assertIn("Total Invoice", html)
+        self.assertIn("Received", html)
+        self.assertIn("Outstanding", html)
+        self.assertNotIn("Next #", html)
 
     def test_bulk_invoice_review_and_save_selected_rows(self):
         html = render_invoice_bulk_review(

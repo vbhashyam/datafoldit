@@ -1275,11 +1275,10 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     invoice_outstanding = sum(db.amount_value(row["balance_due"]) for row in active_rows)
     scope = period_label(filters)
     kpis = f"""
-    <div class="grid cols-4">
+    <div class="grid cols-3">
+      {metric_card("Total Invoice", money(invoice_total), scope)}
+      {metric_card("Received", money(invoice_paid), "Closed")}
       {metric_card("Outstanding", money(invoice_outstanding), "Receivable")}
-      {metric_card("Invoiced", money(invoice_total), scope)}
-      {metric_card("Paid", money(invoice_paid), "Closed")}
-      {metric_card("Next #", esc(next_number), "Draft")}
     </div>
     """
     extract_form = """
