@@ -133,9 +133,9 @@ def make_handler(db_path: Path):
             elif path == "/invoices/extract":
                 self.redirect("/invoices")
             elif path == "/bank":
-                self.send_html(render_bank(self.conn, flash, filters))
+                self.send_html(render_bank(self.conn, flash, bank_filter_from_query(query)))
             elif path == "/expenses":
-                self.send_html(render_expenses(self.conn, flash, filters))
+                self.send_html(render_expenses(self.conn, flash, expense_filter_from_query(query)))
             elif path == "/payroll":
                 self.send_html(render_payroll(self.conn, flash, payroll_filter_from_query(query)))
             elif path == "/invoices":
@@ -164,9 +164,16 @@ def make_handler(db_path: Path):
             try:
                 if parsed.path == "/bank/extract":
                     fields, files = self.read_multipart_form()
-                    saved_path = save_uploaded_file(first_uploaded_file(files.get("attachment")))
-                    extracted = extract_transaction_from_file(saved_path)
-                    self.send_html(render_transaction_review(self.conn, extracted, "Review extracted transaction before saving"))
+                    uploaded_files = uploaded_file_list(files.get("attachment"))
+                    if not uploaded_files:
+                        raise ValueError("Choose an attachment to import")
+                    saved_paths = [save_uploaded_file(uploaded) for uploaded in uploaded_files]
+                    if len(saved_paths) == 1:
+                        extracted = extract_transaction_from_file(saved_paths[0])
+                        self.send_html(render_transaction_review(self.conn, extracted, "Review extracted transaction before saving"))
+                    else:
+                        extracted_rows = extract_transaction_batch(saved_paths)
+                        self.send_html(render_transaction_bulk_review(self.conn, extracted_rows, "Review extracted transactions before saving"))
                     return
                 if parsed.path == "/invoices/extract":
                     if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
@@ -194,20 +201,39 @@ def make_handler(db_path: Path):
                     self.conn.commit()
                     self.redirect(f"/invoices?flash={quote(f'{saved_count} invoices saved')}")
                     return
+                if parsed.path == "/bank/create-bulk":
+                    saved_count = add_bank_transaction_batch(self.conn, self.read_form())
+                    self.conn.commit()
+                    self.redirect(f"/bank?flash={quote(f'{saved_count} transactions saved')}")
+                    return
                 fields = self.read_fields_with_optional_attachment()
                 if parsed.path == "/bank/create":
                     db.add_bank_transaction(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/bank?flash=Bank+transaction+saved")
+                elif parsed.path == "/bank/delete":
+                    db.delete_bank_transaction(self.conn, int(fields.get("transaction_id") or 0))
+                    self.conn.commit()
+                    self.redirect("/bank?flash=Bank+transaction+deleted")
                 elif parsed.path == "/expenses/create":
                     db.add_expense(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/expenses?flash=Expense+saved")
+                elif parsed.path == "/expenses/delete":
+                    db.delete_expense(self.conn, int(fields.get("expense_id") or 0))
+                    self.conn.commit()
+                    self.redirect("/expenses?flash=Expense+deleted")
                 elif parsed.path == "/payroll/create":
                     db.add_payroll_entry(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/payroll?flash=Payroll+entry+saved")
+                elif parsed.path == "/payroll/delete":
+                    db.delete_payroll_entry(self.conn, int(fields.get("payroll_id") or 0))
+                    self.conn.commit()
+                    self.redirect("/payroll?flash=Payroll+entry+deleted")
                 elif parsed.path == "/invoices/create":
+                    if fields.get("attachment_path") and not fields.get("source_pdf"):
+                        fields["source_pdf"] = fields.pop("attachment_path")
                     db.add_invoice(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/invoices?flash=Invoice+saved")
@@ -298,9 +324,9 @@ def make_handler(db_path: Path):
         def read_fields_with_optional_attachment(self) -> dict[str, str]:
             if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
                 fields, files = self.read_multipart_form()
-                saved_path = save_optional_uploaded_file(first_uploaded_file(files.get("attachment")))
-                if saved_path:
-                    fields["attachment_path"] = str(saved_path)
+                saved_paths = save_optional_uploaded_files(files.get("attachment"))
+                if saved_paths:
+                    fields["attachment_path"] = join_attachment_paths(saved_paths)
                 return {key: value for key, value in fields.items() if value.strip() != ""}
             return flatten_form(self.read_form())
 
@@ -338,7 +364,7 @@ def make_handler(db_path: Path):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             content = requested.read_bytes()
-            content_type = {".css": "text/css", ".js": "application/javascript"}.get(
+            content_type = {".css": "text/css", ".js": "application/javascript", ".png": "image/png"}.get(
                 requested.suffix, "application/octet-stream"
             )
             self.send_response(HTTPStatus.OK)
@@ -419,6 +445,18 @@ def date_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     return {"year": year, "month": month}
 
 
+def bank_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
+    filters = date_filter_from_query(query)
+    filters["source"] = (first(query, "source") or "").strip()
+    return filters
+
+
+def expense_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
+    filters = date_filter_from_query(query)
+    filters["paid_by"] = (first(query, "paid_by") or "").strip()
+    return filters
+
+
 def payroll_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters = date_filter_from_query(query)
     filters["employee"] = (first(query, "employee") or "").strip()
@@ -457,6 +495,22 @@ def filter_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> lis
     if not employee:
         return rows
     return [row for row in rows if payroll_employee_name(row) == employee]
+
+
+def filter_bank_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    rows = filter_rows_by_period(rows, "date", filters)
+    source = filters.get("source", "")
+    if source:
+        rows = [row for row in rows if str(row["source"] or "") == source]
+    return rows
+
+
+def filter_expense_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    rows = filter_rows_by_period(rows, "date", filters)
+    paid_by = filters.get("paid_by", "")
+    if paid_by:
+        rows = [row for row in rows if str(row["paid_by"] or "") == paid_by]
+    return rows
 
 
 def filter_invoice_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
@@ -546,6 +600,80 @@ def period_filter_form(conn, path: str, scope: str, filters: dict[str, str]) -> 
     clear_button = f'<a class="button muted compact" href="{esc(path)}">Clear</a>' if selected_year or selected_month else ""
     return f"""
     <form class="filter-form" method="get" action="{esc(path)}">
+      <label>Year
+        <select name="year">{''.join(year_options)}</select>
+      </label>
+      <label>Month
+        <select name="month">{''.join(month_options)}</select>
+      </label>
+      <button class="button compact" type="submit">Apply</button>
+      {clear_button}
+    </form>
+    """
+
+
+def bank_filter_form(conn, filters: dict[str, str]) -> str:
+    selected_source = filters.get("source", "")
+    selected_year = filters.get("year", "")
+    selected_month = filters.get("month", "")
+    source_options = ['<option value="">All paid by / sources</option>']
+    source_options.extend(
+        f'<option value="{esc(source)}"{" selected" if selected_source == source else ""}>{esc(source)}</option>'
+        for source in db.distinct_values(conn, "bank_transactions", "source")
+    )
+    year_options = ['<option value="">All years</option>']
+    year_options.extend(
+        f'<option value="{esc(year)}"{" selected" if selected_year == year else ""}>{esc(year)}</option>'
+        for year in years_for_scope(conn, "bank")
+    )
+    month_options = ['<option value="">All months</option>']
+    month_options.extend(
+        f'<option value="{esc(value)}"{" selected" if selected_month == value else ""}>{esc(label)}</option>'
+        for value, label in MONTHS
+    )
+    clear_button = '<a class="button muted compact" href="/bank">Clear</a>' if selected_source or selected_year or selected_month else ""
+    return f"""
+    <form class="filter-form" method="get" action="/bank">
+      <label class="wide">Paid by / Source
+        <select name="source">{''.join(source_options)}</select>
+      </label>
+      <label>Year
+        <select name="year">{''.join(year_options)}</select>
+      </label>
+      <label>Month
+        <select name="month">{''.join(month_options)}</select>
+      </label>
+      <button class="button compact" type="submit">Apply</button>
+      {clear_button}
+    </form>
+    """
+
+
+def expense_filter_form(conn, filters: dict[str, str]) -> str:
+    selected_paid_by = filters.get("paid_by", "")
+    selected_year = filters.get("year", "")
+    selected_month = filters.get("month", "")
+    paid_by_options = ['<option value="">All paid by</option>']
+    paid_by_options.extend(
+        f'<option value="{esc(paid_by)}"{" selected" if selected_paid_by == paid_by else ""}>{esc(paid_by)}</option>'
+        for paid_by in db.distinct_values(conn, "expenses", "paid_by")
+    )
+    year_options = ['<option value="">All years</option>']
+    year_options.extend(
+        f'<option value="{esc(year)}"{" selected" if selected_year == year else ""}>{esc(year)}</option>'
+        for year in years_for_scope(conn, "expenses")
+    )
+    month_options = ['<option value="">All months</option>']
+    month_options.extend(
+        f'<option value="{esc(value)}"{" selected" if selected_month == value else ""}>{esc(label)}</option>'
+        for value, label in MONTHS
+    )
+    clear_button = '<a class="button muted compact" href="/expenses">Clear</a>' if selected_paid_by or selected_year or selected_month else ""
+    return f"""
+    <form class="filter-form" method="get" action="/expenses">
+      <label class="wide">Paid by
+        <select name="paid_by">{''.join(paid_by_options)}</select>
+      </label>
       <label>Year
         <select name="year">{''.join(year_options)}</select>
       </label>
@@ -674,6 +802,54 @@ def extract_invoice_batch(paths: list[Path]) -> list[dict]:
     return extracted_rows
 
 
+def extract_transaction_batch(paths: list[Path]) -> list[dict]:
+    extracted_rows: list[dict] = []
+    for path in paths:
+        try:
+            extracted = extract_transaction_from_file(path)
+            extracted["_ok"] = True
+            extracted["_source_name"] = path.name
+            extracted_rows.append(extracted)
+        except Exception as exc:
+            extracted_rows.append(
+                {
+                    "_ok": False,
+                    "_source_name": path.name,
+                    "attachment_path": str(path),
+                    "error": str(exc),
+                }
+            )
+    return extracted_rows
+
+
+def add_bank_transaction_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) -> int:
+    try:
+        row_count = int(form_value(fields, "row_count") or "0")
+    except ValueError:
+        row_count = 0
+    saved_count = 0
+    for index in range(row_count):
+        if form_value(fields, f"include_{index}").lower() not in {"on", "1", "yes"}:
+            continue
+        payload = {
+            "date": form_value(fields, f"date_{index}"),
+            "type": form_value(fields, f"type_{index}"),
+            "category": form_value(fields, f"category_{index}"),
+            "amount": form_value(fields, f"amount_{index}"),
+            "detail": form_value(fields, f"detail_{index}"),
+            "source": form_value(fields, f"source_{index}"),
+            "notes": form_value(fields, f"notes_{index}"),
+            "attachment_path": form_value(fields, f"attachment_path_{index}"),
+        }
+        if not any(payload.get(key) for key in ("date", "amount", "detail")):
+            continue
+        db.add_bank_transaction(conn, payload)
+        saved_count += 1
+    if saved_count == 0:
+        raise ValueError("Select at least one transaction to save")
+    return saved_count
+
+
 def add_invoice_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) -> int:
     try:
         row_count = int(form_value(fields, "row_count") or "0")
@@ -735,6 +911,21 @@ def save_optional_uploaded_file(file_info: FileInfo | None) -> Path | None:
     return save_uploaded_file(file_info)
 
 
+def save_optional_uploaded_files(files: list[FileInfo] | None) -> list[Path]:
+    return [save_uploaded_file(file_info) for file_info in uploaded_file_list(files)]
+
+
+def join_attachment_paths(paths: list[Path]) -> str:
+    return "\n".join(str(path) for path in paths)
+
+
+def split_attachment_paths(path_value: str | None) -> list[str]:
+    if not path_value:
+        return []
+    values = re.split(r"[\n|]+", str(path_value))
+    return [value.strip() for value in values if value.strip()]
+
+
 def safe_filename(filename: str) -> str:
     name = Path(filename).name.strip() or "attachment"
     return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-") or "attachment"
@@ -760,18 +951,25 @@ def content_type_for(path: Path) -> str:
 
 
 def attachment_link(path_value: str | None) -> str:
-    if not path_value:
+    paths = split_attachment_paths(path_value)
+    if not paths:
         return ""
-    path = Path(path_value)
-    name = path.name
-    try:
-        resolved = path.resolve()
-        upload_root = UPLOAD_DIR.resolve()
-    except OSError:
-        return esc(name)
-    if not str(resolved).startswith(str(upload_root)) or not resolved.exists():
-        return esc(name)
-    return f'<a class="table-link" href="/attachments/{quote(name)}" target="_blank">View</a>'
+    links = []
+    for index, path_text in enumerate(paths, start=1):
+        path = Path(path_text)
+        name = path.name
+        label = "View" if len(paths) == 1 else f"View {index}"
+        try:
+            resolved = path.resolve()
+            upload_root = UPLOAD_DIR.resolve()
+        except OSError:
+            links.append(esc(name))
+            continue
+        if not str(resolved).startswith(str(upload_root)) or not resolved.exists():
+            links.append(esc(name))
+            continue
+        links.append(f'<a class="table-link" href="/attachments/{quote(name)}" target="_blank">{esc(label)}</a>')
+    return '<span class="attachment-links">' + "".join(links) + "</span>"
 
 
 def flatten_form(fields: dict[str, list[str]]) -> dict[str, str]:
@@ -828,7 +1026,7 @@ def layout(
     <header class="app-header">
       <div class="header-main">
         <a class="brand" href="/">
-          <div class="brand-mark">DF</div>
+          <img class="brand-logo" src="/static/dfi_logo.png" alt="DataFold IT">
           <div class="brand-name">
             <strong>DataFold IT</strong>
             <span>Operations</span>
@@ -889,7 +1087,7 @@ def login_page(error: str | None = None) -> str:
 </head>
 <body class="login-page">
   <form class="login-card" method="post" action="/login">
-    <div class="brand-mark">DF</div>
+    <img class="login-logo" src="/static/dfi_logo.png" alt="DataFold IT">
     <h1>DataFold IT Operations</h1>
     <p>Local finance workspace</p>
     {error_html}
@@ -1000,9 +1198,19 @@ def section_stack(*sections: str) -> str:
     return '<div class="section-stack">' + "".join(sections) + "</div>"
 
 
+TRANSACTION_TYPE_OPTIONS = ["Deposit", "Expense", "Opening", "Transfer In", "Transfer Out", "Adjustment In", "Adjustment Out"]
+
+
+def transaction_type_options_html(selected: str | None = None) -> str:
+    return "".join(
+        f'<option value="{esc(option)}"{" selected" if selected == option else ""}>{esc(option)}</option>'
+        for option in TRANSACTION_TYPE_OPTIONS
+    )
+
+
 def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
-    rows = filter_rows_by_period(db.rows_for_table(conn, "bank_transactions"), "date", filters)
+    rows = filter_bank_rows(db.rows_for_table(conn, "bank_transactions"), filters)
     metrics = db.dashboard_metrics(conn)
     signed_values = [db.bank_signed_amount(row) for row in rows]
     deposits = sum(max(value, 0) for value in signed_values)
@@ -1018,26 +1226,29 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
     """
     smart_form = """
     <form method="post" action="/bank/extract" enctype="multipart/form-data" class="form-grid">
-      <label class="span-4">Attachment
-        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic,.xlsx,.xlsm,.xls,.docx,.doc,.txt,.csv" required>
+      <label class="span-4">Source files
+        <input type="file" name="attachment" multiple required>
       </label>
-      <div class="span-4 actions"><button class="button secondary" type="submit">Read and review transaction</button></div>
+      <div class="span-4 actions"><button class="button secondary" type="submit">Read transaction file(s) and review</button></div>
     </form>
     """
     form = f"""
-    <form method="post" action="/bank/create" class="form-grid">
+    <form method="post" action="/bank/create" enctype="multipart/form-data" class="form-grid">
       {input_field("date", "Date", "date", required=True)}
-      {select_field("type", "Type", ["Deposit", "Expense", "Opening", "Transfer In", "Transfer Out", "Adjustment In", "Adjustment Out"], required=True)}
+      {select_field("type", "Type", TRANSACTION_TYPE_OPTIONS, required=True)}
       {input_field("category", "Category", "text")}
       {input_field("amount", "Amount", "number", step="0.01", required=True)}
       {input_field("detail", "Vendor / Detail", "text", css="span-2")}
-      {input_field("source", "Paid By / Source", "text")}
+      {datalist_field("source", "Paid By / Source", db.distinct_values(conn, "bank_transactions", "source"))}
       {input_field("notes", "Notes", "text")}
+      <label class="span-4">Attachments
+        <input type="file" name="attachment" multiple>
+      </label>
       <div class="span-4 actions"><button class="button" type="submit">Save transaction</button></div>
     </form>
     """
     table = render_table(
-        ["Date", "Type", "Category", "Detail", "Source", "Amount", "Signed", "Attachment"],
+        ["Date", "Type", "Category", "Detail", "Source", "Amount", "Signed", "Attachment", "Action"],
         [
             [
                 row["date"],
@@ -1048,16 +1259,17 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
                 money(row["amount"]),
                 signed_money(db.bank_signed_amount(row)),
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
+                delete_control("/bank/delete", "transaction_id", row["id"], row["detail"] or row["date"], "transaction"),
             ]
             for row in rows
         ],
-        raw_columns={6, 7},
+        raw_columns={6, 7, 8},
         money_columns={5, 6},
     )
     smart_panel = f'<div class="panel-body">{smart_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
     content = section_stack(kpis, panel("Smart Transaction Import", smart_panel), panel("New Bank Transaction", form_panel), panel("Bank Ledger", table))
-    return layout(conn, "Bank", "Ledger", "/bank", content, flash, period_filter_form(conn, "/bank", "bank", filters))
+    return layout(conn, "Bank", "Ledger", "/bank", content, flash, bank_filter_form(conn, filters))
 
 
 def render_transaction_review(conn, extracted: dict, flash: str | None = None) -> str:
@@ -1068,7 +1280,7 @@ def render_transaction_review(conn, extracted: dict, flash: str | None = None) -
     form = f"""
     <form method="post" action="/bank/create" class="form-grid">
       {input_field("date", "Date", "date", value=extracted.get("date"), required=True)}
-      {select_field("type", "Type", ["Deposit", "Expense", "Opening", "Transfer In", "Transfer Out", "Adjustment In", "Adjustment Out"], selected=extracted.get("type") or "Expense", required=True)}
+      {select_field("type", "Type", TRANSACTION_TYPE_OPTIONS, selected=extracted.get("type") or "Expense", required=True)}
       {input_field("category", "Category", "text", value=extracted.get("category"))}
       {input_field("amount", "Amount", "number", value=currency_input(extracted.get("amount")), step="0.01", required=True)}
       {input_field("detail", "Vendor / Detail", "text", value=extracted.get("detail"), css="span-2")}
@@ -1093,9 +1305,76 @@ def render_transaction_review(conn, extracted: dict, flash: str | None = None) -
     return layout(conn, "Transaction Review", "Bank", "/bank", content, flash, '<a class="button muted" href="/bank">Back to bank</a>')
 
 
+def render_transaction_bulk_review(conn, extracted_rows: list[dict], flash: str | None = None) -> str:
+    form_index = 0
+    rows_html = []
+    for extracted in extracted_rows:
+        attachment_path = extracted.get("attachment_path") or ""
+        source_name = extracted.get("_source_name") or Path(attachment_path).name or "Uploaded file"
+        attachment_html = attachment_link(attachment_path) or esc(source_name)
+        if not extracted.get("_ok"):
+            rows_html.append(
+                f"""
+                <tr class="bulk-error-row">
+                  <td></td>
+                  <td>{attachment_html}</td>
+                  <td colspan="7"><strong>Could not read this file.</strong> {esc(extracted.get("error") or "")}</td>
+                </tr>
+                """
+            )
+            continue
+        tx_type = extracted.get("type") or "Expense"
+        rows_html.append(
+            f"""
+            <tr>
+              <td><input class="bulk-check" type="checkbox" name="include_{form_index}" aria-label="Save {esc(source_name)}" checked></td>
+              <td>{attachment_html}<input type="hidden" name="attachment_path_{form_index}" value="{esc(attachment_path)}"></td>
+              <td>{bulk_input(f"date_{form_index}", "Date", "date", extracted.get("date"), required=True)}</td>
+              <td><select name="type_{form_index}" aria-label="Type">{transaction_type_options_html(tx_type)}</select></td>
+              <td>{bulk_input(f"category_{form_index}", "Category", "text", extracted.get("category"))}</td>
+              <td>{bulk_input(f"detail_{form_index}", "Vendor / Detail", "text", extracted.get("detail"), required=True)}</td>
+              <td>{bulk_input(f"source_{form_index}", "Paid by / Source", "text", extracted.get("source"))}</td>
+              <td>{bulk_input(f"amount_{form_index}", "Amount", "number", currency_input(extracted.get("amount")), step="0.01", required=True)}</td>
+              <td>{bulk_input(f"notes_{form_index}", "Notes", "text", extracted.get("notes"))}</td>
+            </tr>
+            """
+        )
+        form_index += 1
+    disabled = " disabled" if form_index == 0 else ""
+    table = f"""
+    <form method="post" action="/bank/create-bulk" class="bulk-review-form">
+      <input type="hidden" name="row_count" value="{form_index}">
+      <div class="table-wrap">
+        <table class="bulk-review-table">
+          <thead>
+            <tr>
+              <th>Save</th>
+              <th>File</th>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Category</th>
+              <th>Detail</th>
+              <th>Source</th>
+              <th>Amount</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(rows_html)}</tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="button" type="submit"{disabled}>Save selected transactions</button>
+        <a class="button secondary" href="/bank">Cancel</a>
+      </div>
+    </form>
+    """
+    content = section_stack(panel("Bulk Transaction Review", f'<div class="panel-body">{table}</div>'))
+    return layout(conn, "Bulk Transaction Review", "Bank", "/bank", content, flash, '<a class="button muted" href="/bank">Back to bank</a>')
+
+
 def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
-    rows = filter_rows_by_period(db.rows_for_table(conn, "expenses"), "date", filters)
+    rows = filter_expense_rows(db.rows_for_table(conn, "expenses"), filters)
     total_spend = sum(db.amount_value(row["amount"]) for row in rows)
     scope = period_label(filters)
     kpis = f"""
@@ -1113,17 +1392,17 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
       {input_field("vendor", "Vendor", "text")}
       {input_field("amount", "Amount", "number", step="0.01", required=True)}
       {input_field("description", "Description", "text", css="span-2")}
-      {input_field("paid_by", "Paid By", "text")}
+      {datalist_field("paid_by", "Paid By", db.distinct_values(conn, "expenses", "paid_by"))}
       {select_field("frequency", "Frequency", ["One-time", "Monthly", "Yearly", "Recurring"])}
-      <label class="span-4">Attachment
-        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic,.xlsx,.xlsm,.xls,.docx,.doc,.txt,.csv">
+      <label class="span-4">Attachments
+        <input type="file" name="attachment" multiple>
       </label>
       {textarea_field("notes", "Notes", "span-4")}
       <div class="span-4 actions"><button class="button" type="submit">Save expense</button></div>
     </form>
     """
     table = render_table(
-        ["Date", "Category", "Vendor", "Description", "Amount", "Paid By", "Frequency", "Notes", "Attachment"],
+        ["Date", "Category", "Vendor", "Description", "Amount", "Paid By", "Frequency", "Notes", "Attachment", "Action"],
         [
             [
                 row["date"],
@@ -1135,15 +1414,16 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
                 row["frequency"],
                 row["notes"],
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
+                delete_control("/expenses/delete", "expense_id", row["id"], row["vendor"] or row["description"] or row["date"], "expense"),
             ]
             for row in rows
         ],
-        raw_columns={8},
+        raw_columns={8, 9},
         money_columns={4},
     )
     form_panel = f'<div class="panel-body">{form}</div>'
     content = section_stack(kpis, panel("New Business Expense", form_panel), panel("Expense Log", table))
-    return layout(conn, "Expenses", "Spend", "/expenses", content, flash, period_filter_form(conn, "/expenses", "expenses", filters))
+    return layout(conn, "Expenses", "Spend", "/expenses", content, flash, expense_filter_form(conn, filters))
 
 
 def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
@@ -1177,14 +1457,14 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
       {input_field("commission", "Commission", "number", step="0.01")}
       {input_field("employee_pay", "Payroll After Commission", "number", step="0.01")}
       {input_field("credit_date", "Credit Date", "date")}
-      <label class="span-4">Attachment
-        <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,.heic,.xlsx,.xlsm,.xls,.docx,.doc,.txt,.csv">
+      <label class="span-4">Attachments
+        <input type="file" name="attachment" multiple>
       </label>
       <div class="span-4 actions"><button class="button" type="submit">Save payroll</button></div>
     </form>
     """
     table = render_table(
-        ["Month", "Name", "Vendor", "Client", "Hours", "Gross", "Commission", "Employee Pay", "Credit Date", "Attachment"],
+        ["Month", "Name", "Vendor", "Client", "Hours", "Gross", "Commission", "Employee Pay", "Credit Date", "Attachment", "Action"],
         [
             [
                 row["month"],
@@ -1197,10 +1477,17 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
                 money(row["employee_pay"]),
                 row["credit_date"],
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
+                delete_control(
+                    "/payroll/delete",
+                    "payroll_id",
+                    row["id"],
+                    f"{row['first_name'] or ''} {row['last_name'] or ''}".strip() or row["month"],
+                    "payroll entry",
+                ),
             ]
             for row in rows
         ],
-        raw_columns={9},
+        raw_columns={9, 10},
         money_columns={5, 6, 7},
     )
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -1247,12 +1534,11 @@ def invoice_status_inline_control(row) -> str:
     """
 
 
-def invoice_delete_control(row) -> str:
-    label = row["invoice_number"] or "this invoice"
+def delete_control(action: str, id_name: str, id_value, label: str, entity: str) -> str:
     return f"""
-    <form class="inline-delete-form" method="post" action="/invoices/delete" data-confirm-message="Are you sure you want to delete invoice {esc(label)}? This cannot be undone.">
-      <input type="hidden" name="invoice_id" value="{esc(row["id"])}">
-      <button class="button danger compact icon-button" type="submit" aria-label="Delete invoice {esc(label)}" title="Delete invoice">
+    <form class="inline-delete-form" method="post" action="{esc(action)}" data-confirm-message="Are you sure you want to delete {esc(entity)} {esc(label)}? This cannot be undone.">
+      <input type="hidden" name="{esc(id_name)}" value="{esc(id_value)}">
+      <button class="button danger compact icon-button" type="submit" aria-label="Delete {esc(entity)} {esc(label)}" title="Delete">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3 6h18"></path>
           <path d="M8 6V4h8v2"></path>
@@ -1265,10 +1551,16 @@ def invoice_delete_control(row) -> str:
     """
 
 
+def invoice_delete_control(row) -> str:
+    label = row["invoice_number"] or "this invoice"
+    return delete_control("/invoices/delete", "invoice_id", row["id"], label, "invoice")
+
+
 def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
     rows = filter_invoice_rows(db.rows_for_table(conn, "invoices"), filters)
     next_number = db.next_invoice_number(conn)
+    customer_options = db.distinct_values(conn, "invoices", "customer")
     active_rows = [row for row in rows if not row["is_void"]]
     invoice_total = sum(db.amount_value(row["amount"]) for row in active_rows)
     invoice_paid = sum(db.amount_value(row["amount"]) for row in active_rows if invoice_status_label(row) == "Received")
@@ -1293,14 +1585,17 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     </form>
     """
     form = f"""
-    <form method="post" action="/invoices/create" class="form-grid">
+    <form method="post" action="/invoices/create" enctype="multipart/form-data" class="form-grid">
       {input_field("date", "Date", "date", required=True)}
       {input_field("invoice_number", "Invoice #", "text", value=next_number, required=True)}
-      {input_field("customer", "Customer / Client", "text", required=True)}
+      {datalist_field("customer", "Customer / Client", customer_options, required=True)}
       {input_field("amount", "Amount", "number", step="0.01", required=True)}
       {input_field("due_date", "Due Date", "date")}
       {invoice_status_select()}
       {input_field("balance_due", "Balance Due", "number", step="0.01")}
+      <label class="span-4">Attachments
+        <input type="file" name="attachment" multiple>
+      </label>
       <div class="span-4 actions"><button class="button" type="submit">Save invoice</button></div>
     </form>
     """
@@ -1337,7 +1632,7 @@ def render_invoice_review(conn, extracted: dict, flash: str | None = None) -> st
     <form method="post" action="/invoices/create" class="form-grid">
       {input_field("date", "Date", "date", value=extracted.get("date"), required=True)}
       {input_field("invoice_number", "Invoice #", "text", value=extracted.get("invoice_number") or db.next_invoice_number(conn), required=True)}
-      {input_field("customer", "Customer / Client", "text", value=extracted.get("customer"), required=True)}
+      {datalist_field("customer", "Customer / Client", db.distinct_values(conn, "invoices", "customer"), value=extracted.get("customer"), required=True)}
       {input_field("amount", "Amount", "number", value=currency_input(extracted.get("amount")), step="0.01", required=True)}
       {input_field("due_date", "Due Date", "date", value=extracted.get("due_date"))}
       {invoice_status_select(invoice_status_choice(extracted.get("status"), extracted.get("received"), extracted.get("is_void")))}
@@ -1552,6 +1847,25 @@ def input_field(
     step_attr = f' step="{esc(step)}"' if step else ""
     value_attr = f' value="{esc(value)}"' if value is not None else ""
     return f'<label class="{esc(css)}">{esc(label)}<input type="{esc(input_type)}" name="{esc(name)}"{value_attr}{step_attr}{required_attr}></label>'
+
+
+def datalist_field(
+    name: str,
+    label: str,
+    options: list[str],
+    value: str | None = None,
+    css: str = "",
+    required: bool = False,
+) -> str:
+    required_attr = " required" if required else ""
+    value_attr = f' value="{esc(value)}"' if value is not None else ""
+    list_id = f"{safe_filename(name)}-options"
+    option_html = "".join(f'<option value="{esc(option)}"></option>' for option in options)
+    return (
+        f'<label class="{esc(css)}">{esc(label)}'
+        f'<input type="text" name="{esc(name)}" list="{esc(list_id)}"{value_attr}{required_attr}>'
+        f'<datalist id="{esc(list_id)}">{option_html}</datalist></label>'
+    )
 
 
 def textarea_field(name: str, label: str, css: str = "") -> str:

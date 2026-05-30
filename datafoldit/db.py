@@ -225,6 +225,14 @@ def add_bank_transaction(conn: sqlite3.Connection, payload: dict[str, Any]) -> i
     return entity_id
 
 
+def delete_bank_transaction(conn: sqlite3.Connection, transaction_id: int) -> None:
+    row = conn.execute("SELECT detail FROM bank_transactions WHERE id = ?", (transaction_id,)).fetchone()
+    if row is None:
+        raise ValueError("Bank transaction was not found")
+    conn.execute("DELETE FROM bank_transactions WHERE id = ?", (transaction_id,))
+    audit(conn, "delete", "bank_transaction", transaction_id, {"detail": row["detail"]})
+
+
 def add_expense(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     expense_date = normalize_date(payload.get("date")) or date.today().isoformat()
     cur = conn.execute(
@@ -248,6 +256,14 @@ def add_expense(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     entity_id = int(cur.lastrowid)
     audit(conn, "create", "expense", entity_id, payload)
     return entity_id
+
+
+def delete_expense(conn: sqlite3.Connection, expense_id: int) -> None:
+    row = conn.execute("SELECT vendor, description FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    if row is None:
+        raise ValueError("Expense was not found")
+    conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    audit(conn, "delete", "expense", expense_id, {"vendor": row["vendor"], "description": row["description"]})
 
 
 def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
@@ -281,6 +297,23 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     entity_id = int(cur.lastrowid)
     audit(conn, "create", "payroll_entry", entity_id, payload)
     return entity_id
+
+
+def delete_payroll_entry(conn: sqlite3.Connection, payroll_id: int) -> None:
+    row = conn.execute(
+        "SELECT first_name, last_name, month FROM payroll_entries WHERE id = ?",
+        (payroll_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("Payroll entry was not found")
+    conn.execute("DELETE FROM payroll_entries WHERE id = ?", (payroll_id,))
+    audit(
+        conn,
+        "delete",
+        "payroll_entry",
+        payroll_id,
+        {"name": f"{row['first_name'] or ''} {row['last_name'] or ''}".strip(), "month": row["month"]},
+    )
 
 
 def payroll_amounts(payload: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
@@ -685,6 +718,7 @@ def distinct_values(conn: sqlite3.Connection, table: str, column: str) -> list[s
         ("expenses", "frequency"),
         ("bank_transactions", "type"),
         ("bank_transactions", "category"),
+        ("bank_transactions", "source"),
         ("invoices", "customer"),
         ("payroll_entries", "vendor"),
         ("payroll_entries", "client"),

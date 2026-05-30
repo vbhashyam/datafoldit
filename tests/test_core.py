@@ -8,7 +8,21 @@ from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
 from datafoldit.transaction_import import parse_transaction_text
-from datafoldit.web import add_invoice_batch, filter_invoice_rows, filter_rows_by_period, render_invoice_bulk_review, render_invoices
+from datafoldit.web import (
+    add_bank_transaction_batch,
+    add_invoice_batch,
+    attachment_link,
+    filter_bank_rows,
+    filter_expense_rows,
+    filter_invoice_rows,
+    filter_rows_by_period,
+    render_bank,
+    render_expenses,
+    render_invoice_bulk_review,
+    render_invoices,
+    render_payroll,
+    render_transaction_bulk_review,
+)
 
 
 class DataFoldCoreTests(unittest.TestCase):
@@ -101,6 +115,61 @@ class DataFoldCoreTests(unittest.TestCase):
         payroll = db.rows_for_table(self.conn, "payroll_entries")[0]
         self.assertEqual(expense["attachment_path"], "/tmp/zoom-receipt.pdf")
         self.assertEqual(payroll["attachment_path"], "/tmp/payroll.pdf")
+
+    def test_multiple_attachment_paths_render_as_multiple_links(self):
+        html = attachment_link("/tmp/receipt-one.pdf\n/tmp/receipt-two.docx")
+        self.assertIn("receipt-one.pdf", html)
+        self.assertIn("receipt-two.docx", html)
+
+    def test_bank_and_expense_filters_and_delete_helpers(self):
+        bank_id = db.add_bank_transaction(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "type": "Expense",
+                "detail": "Laptop",
+                "source": "Vamsi",
+                "amount": "900",
+            },
+        )
+        db.add_bank_transaction(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "type": "Expense",
+                "detail": "Software",
+                "source": "Aditya",
+                "amount": "100",
+            },
+        )
+        db.add_expense(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "vendor": "Apple",
+                "paid_by": "Vamsi",
+                "amount": "900",
+            },
+        )
+        expense_id = db.add_expense(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "vendor": "Adobe",
+                "paid_by": "Aditya",
+                "amount": "100",
+            },
+        )
+        bank_rows = filter_bank_rows(db.rows_for_table(self.conn, "bank_transactions"), {"source": "Vamsi", "year": "", "month": ""})
+        expense_rows = filter_expense_rows(db.rows_for_table(self.conn, "expenses"), {"paid_by": "Aditya", "year": "", "month": ""})
+        self.assertEqual([row["detail"] for row in bank_rows], ["Laptop"])
+        self.assertEqual([row["vendor"] for row in expense_rows], ["Adobe"])
+        db.delete_bank_transaction(self.conn, bank_id)
+        db.delete_expense(self.conn, expense_id)
+        remaining_bank = self.conn.execute("SELECT COUNT(*) AS count FROM bank_transactions WHERE id = ?", (bank_id,)).fetchone()
+        remaining_expense = self.conn.execute("SELECT COUNT(*) AS count FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        self.assertEqual(remaining_bank["count"], 0)
+        self.assertEqual(remaining_expense["count"], 0)
 
     def test_payroll_calculates_from_rate_hours_and_commission_percent(self):
         db.add_payroll_entry(
@@ -261,6 +330,15 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(deleted["count"], 0)
 
     def test_invoice_upload_accepts_multiple_file_types(self):
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "invoice_number": "INV-CLIENT-001",
+                "customer": "Dropdown Client LLC",
+                "amount": "100",
+            },
+        )
         html = render_invoices(self.conn)
         self.assertIn('type="file" name="attachment" multiple', html)
         self.assertIn("Read Invoice Files", html)
@@ -270,6 +348,94 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Received", html)
         self.assertIn("Outstanding", html)
         self.assertNotIn("Next #", html)
+        self.assertIn('<datalist id="customer-options">', html)
+        self.assertIn("Dropdown Client LLC", html)
+
+    def test_bank_expense_payroll_pages_have_bulk_upload_and_delete_controls(self):
+        db.add_bank_transaction(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "type": "Expense",
+                "detail": "Cloud",
+                "source": "Vamsi",
+                "amount": "42",
+            },
+        )
+        db.add_expense(
+            self.conn,
+            {
+                "date": "2026-05-29",
+                "vendor": "Cloud Vendor",
+                "paid_by": "Aditya",
+                "amount": "42",
+            },
+        )
+        db.add_payroll_entry(
+            self.conn,
+            {
+                "month": "2026-05",
+                "first_name": "Alex",
+                "amount": "42",
+            },
+        )
+        bank_html = render_bank(self.conn)
+        expenses_html = render_expenses(self.conn)
+        payroll_html = render_payroll(self.conn)
+        self.assertIn('name="attachment" multiple required', bank_html)
+        self.assertIn('name="source"', bank_html)
+        self.assertIn('/bank/delete', bank_html)
+        self.assertIn('name="attachment" multiple', expenses_html)
+        self.assertIn('name="paid_by"', expenses_html)
+        self.assertIn('/expenses/delete', expenses_html)
+        self.assertIn('name="attachment" multiple', payroll_html)
+        self.assertIn('/payroll/delete', payroll_html)
+
+    def test_bulk_bank_review_and_save_selected_rows(self):
+        html = render_transaction_bulk_review(
+            self.conn,
+            [
+                {
+                    "_ok": True,
+                    "_source_name": "bank-one.csv",
+                    "attachment_path": "/tmp/bank-one.csv",
+                    "date": "2026-05-29",
+                    "type": "Expense",
+                    "category": "Software",
+                    "detail": "SaaS",
+                    "source": "Vamsi",
+                    "amount": 120,
+                    "notes": "Imported",
+                },
+                {
+                    "_ok": False,
+                    "_source_name": "bad-file.bin",
+                    "attachment_path": "/tmp/bad-file.bin",
+                    "error": "Could not read enough text",
+                },
+            ],
+        )
+        self.assertIn('action="/bank/create-bulk"', html)
+        self.assertIn('name="row_count" value="1"', html)
+        saved = add_bank_transaction_batch(
+            self.conn,
+            {
+                "row_count": ["1"],
+                "include_0": ["on"],
+                "date_0": ["2026-05-29"],
+                "type_0": ["Expense"],
+                "category_0": ["Software"],
+                "detail_0": ["SaaS"],
+                "source_0": ["Vamsi"],
+                "amount_0": ["120"],
+                "notes_0": ["Imported"],
+                "attachment_path_0": ["/tmp/bank-one.csv"],
+            },
+        )
+        self.assertEqual(saved, 1)
+        row = self.conn.execute("SELECT detail, source, attachment_path FROM bank_transactions WHERE detail = 'SaaS'").fetchone()
+        self.assertEqual(row["source"], "Vamsi")
+        self.assertEqual(row["attachment_path"], "/tmp/bank-one.csv")
 
     def test_bulk_invoice_review_and_save_selected_rows(self):
         html = render_invoice_bulk_review(
