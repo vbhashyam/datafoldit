@@ -459,9 +459,7 @@ def expense_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
 
 def payroll_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters = date_filter_from_query(query)
-    filters["first_name"] = (first(query, "first_name") or "").strip()
-    filters["last_name"] = (first(query, "last_name") or "").strip()
-    filters["client"] = (first(query, "client") or "").strip()
+    filters["candidate"] = (first(query, "candidate") or "").strip()
     return filters
 
 
@@ -493,15 +491,9 @@ def filter_rows_by_period(rows: list[sqlite3.Row], date_key: str, filters: dict[
 
 def filter_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
     rows = filter_rows_by_period(rows, "month", filters)
-    first_name = filters.get("first_name", "")
-    last_name = filters.get("last_name", "")
-    client = filters.get("client", "")
-    if first_name:
-        rows = [row for row in rows if str(row["first_name"] or "") == first_name]
-    if last_name:
-        rows = [row for row in rows if str(row["last_name"] or "") == last_name]
-    if client:
-        rows = [row for row in rows if str(row["client"] or "") == client]
+    candidate = filters.get("candidate", "")
+    if candidate:
+        rows = [row for row in rows if payroll_employee_name(row) == candidate]
     return rows
 
 
@@ -546,16 +538,11 @@ def period_label(filters: dict[str, str]) -> str:
 
 
 def payroll_label(filters: dict[str, str]) -> str:
-    selected = [
-        filters.get("first_name", ""),
-        filters.get("last_name", ""),
-        filters.get("client", ""),
-    ]
-    detail = " · ".join(value for value in selected if value)
+    candidate = filters.get("candidate", "")
     period = period_label(filters)
-    if detail and period != "All data":
-        return f"{detail} · {period}"
-    return detail or period
+    if candidate and period != "All data":
+        return f"{candidate} · {period}"
+    return candidate or period
 
 
 def payroll_employee_name(row: sqlite3.Row) -> str:
@@ -700,25 +687,13 @@ def expense_filter_form(conn, filters: dict[str, str]) -> str:
 
 
 def payroll_filter_form(conn, filters: dict[str, str]) -> str:
-    selected_first_name = filters.get("first_name", "")
-    selected_last_name = filters.get("last_name", "")
-    selected_client = filters.get("client", "")
+    selected_candidate = filters.get("candidate", "")
     selected_year = filters.get("year", "")
     selected_month = filters.get("month", "")
-    first_name_options = ['<option value="">All first names</option>']
-    first_name_options.extend(
-        f'<option value="{esc(first_name)}"{" selected" if selected_first_name == first_name else ""}>{esc(first_name)}</option>'
-        for first_name in db.distinct_values(conn, "payroll_entries", "first_name")
-    )
-    last_name_options = ['<option value="">All last names</option>']
-    last_name_options.extend(
-        f'<option value="{esc(last_name)}"{" selected" if selected_last_name == last_name else ""}>{esc(last_name)}</option>'
-        for last_name in db.distinct_values(conn, "payroll_entries", "last_name")
-    )
-    client_options = ['<option value="">All clients</option>']
-    client_options.extend(
-        f'<option value="{esc(client)}"{" selected" if selected_client == client else ""}>{esc(client)}</option>'
-        for client in db.distinct_values(conn, "payroll_entries", "client")
+    candidate_options = ['<option value="">All candidates</option>']
+    candidate_options.extend(
+        f'<option value="{esc(candidate)}"{" selected" if selected_candidate == candidate else ""}>{esc(candidate)}</option>'
+        for candidate in payroll_employees(conn)
     )
     year_options = ['<option value="">All years</option>']
     year_options.extend(
@@ -732,19 +707,13 @@ def payroll_filter_form(conn, filters: dict[str, str]) -> str:
     )
     clear_button = (
         '<a class="button muted compact" href="/payroll">Clear</a>'
-        if selected_first_name or selected_last_name or selected_client or selected_year or selected_month
+        if selected_candidate or selected_year or selected_month
         else ""
     )
     return f"""
     <form class="filter-form" method="get" action="/payroll">
-      <label>First Name
-        <select name="first_name">{''.join(first_name_options)}</select>
-      </label>
-      <label>Last Name
-        <select name="last_name">{''.join(last_name_options)}</select>
-      </label>
-      <label class="wide">Client
-        <select name="client">{''.join(client_options)}</select>
+      <label class="wide">Candidate Name
+        <select name="candidate">{''.join(candidate_options)}</select>
       </label>
       <label>Year
         <select name="year">{''.join(year_options)}</select>
@@ -1559,7 +1528,7 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
 
 
 def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
-    filters = filters or {"year": "", "month": "", "first_name": "", "last_name": "", "client": ""}
+    filters = filters or {"year": "", "month": "", "candidate": ""}
     rows = filter_payroll_rows(db.rows_for_table(conn, "payroll_entries"), filters)
     gross = sum(db.amount_value(row["gross"]) for row in rows)
     commission = sum(db.amount_value(row["commission"]) for row in rows)

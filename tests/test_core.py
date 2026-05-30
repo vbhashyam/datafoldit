@@ -172,7 +172,7 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(remaining_bank["count"], 0)
         self.assertEqual(remaining_expense["count"], 0)
 
-    def test_payroll_filters_by_first_name_last_name_and_client(self):
+    def test_payroll_filters_by_candidate_name(self):
         db.add_payroll_entry(
             self.conn,
             {
@@ -196,11 +196,9 @@ class DataFoldCoreTests(unittest.TestCase):
             },
         )
         rows = db.rows_for_table(self.conn, "payroll_entries")
-        alex_rows = filter_payroll_rows(rows, {"first_name": "Alex", "last_name": "", "client": "", "year": "", "month": ""})
-        rao_rows = filter_payroll_rows(rows, {"first_name": "", "last_name": "Rao", "client": "", "year": "", "month": ""})
-        beta_rows = filter_payroll_rows(rows, {"first_name": "", "last_name": "", "client": "Beta Client", "year": "", "month": ""})
+        alex_rows = filter_payroll_rows(rows, {"candidate": "Alex Rao", "year": "", "month": ""})
+        beta_rows = filter_payroll_rows(rows, {"candidate": "Maya Patel", "year": "", "month": ""})
         self.assertEqual([row["client"] for row in alex_rows], ["Acme Client"])
-        self.assertEqual([row["first_name"] for row in rao_rows], ["Alex"])
         self.assertEqual([row["first_name"] for row in beta_rows], ["Maya"])
 
     def test_payroll_calculates_from_rate_hours_and_commission_percent(self):
@@ -427,6 +425,10 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Aditya - $42.00", expenses_html)
         self.assertIn('/expenses/delete', expenses_html)
         self.assertIn('name="attachment" multiple', payroll_html)
+        self.assertIn("Candidate Name", payroll_html)
+        self.assertIn('name="candidate"', payroll_html)
+        self.assertIn("All candidates", payroll_html)
+        self.assertNotIn("All clients", payroll_html)
         self.assertIn('name="first_name"', payroll_html)
         self.assertIn('name="last_name"', payroll_html)
         self.assertIn('name="client"', payroll_html)
