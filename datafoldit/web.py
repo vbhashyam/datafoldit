@@ -1576,9 +1576,9 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     form = f"""
     <form method="post" action="/payroll/create" enctype="multipart/form-data" class="form-grid" data-payroll-form>
       {input_field("month", "Month", "month", required=True)}
-      {input_field("first_name", "First Name", "text")}
-      {input_field("last_name", "Last Name", "text")}
-      {input_field("client", "Client", "text")}
+      {datalist_field("first_name", "First Name", db.distinct_values(conn, "payroll_entries", "first_name"))}
+      {datalist_field("last_name", "Last Name", db.distinct_values(conn, "payroll_entries", "last_name"))}
+      {datalist_field("client", "Client", db.distinct_values(conn, "payroll_entries", "client"))}
       {input_field("vendor", "Vendor", "text", css="span-2")}
       {input_field("job_start", "Job Start", "date")}
       {input_field("job_end", "Job End", "date")}
