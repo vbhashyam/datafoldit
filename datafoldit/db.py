@@ -720,6 +720,8 @@ def distinct_values(conn: sqlite3.Connection, table: str, column: str) -> list[s
         ("bank_transactions", "category"),
         ("bank_transactions", "source"),
         ("invoices", "customer"),
+        ("payroll_entries", "first_name"),
+        ("payroll_entries", "last_name"),
         ("payroll_entries", "vendor"),
         ("payroll_entries", "client"),
     }
