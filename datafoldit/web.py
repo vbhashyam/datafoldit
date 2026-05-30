@@ -1026,10 +1026,10 @@ def layout(
     <header class="app-header">
       <div class="header-main">
         <a class="brand" href="/">
-          <img class="brand-logo" src="/static/dfi_logo.png" alt="DataFold IT">
+          <div class="brand-mark">DF</div>
           <div class="brand-name">
-            <strong>DataFold IT</strong>
-            <span>Operations</span>
+            <strong>DataFoldIT</strong>
+            <span>Your Vision. Our Expertise</span>
           </div>
         </a>
         <div class="header-actions">
@@ -1087,9 +1087,14 @@ def login_page(error: str | None = None) -> str:
 </head>
 <body class="login-page">
   <form class="login-card" method="post" action="/login">
-    <img class="login-logo" src="/static/dfi_logo.png" alt="DataFold IT">
-    <h1>DataFold IT Operations</h1>
-    <p>Local finance workspace</p>
+    <div class="login-brand">
+      <div class="brand-mark">DF</div>
+      <div class="brand-name">
+        <strong>DataFoldIT</strong>
+        <span>Your Vision. Our Expertise</span>
+      </div>
+    </div>
+    <p>Operations workspace</p>
     {error_html}
     <label>Password
       <input type="password" name="password" autocomplete="current-password" required autofocus>
