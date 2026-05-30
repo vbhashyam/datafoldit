@@ -709,6 +709,16 @@ textarea {
   background: #132232;
 }
 
+.ledger-filter-body {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.ledger-filter-form {
+  justify-content: flex-start;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

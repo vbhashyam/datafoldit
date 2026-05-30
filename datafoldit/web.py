@@ -1187,7 +1187,7 @@ def metric_card(label: str, value: str, note: str, tone: str = "info") -> str:
 
 
 def panel(title: str, body: str) -> str:
-    if body.lstrip().startswith('<div class="panel-body"'):
+    if body.lstrip().startswith('<div class="panel-body'):
         panel_body = body
     else:
         panel_body = f'<div class="table-wrap">{body}</div>'
@@ -1208,9 +1208,54 @@ def transaction_type_options_html(selected: str | None = None) -> str:
     )
 
 
+def bank_source_spend_summary(rows: list[sqlite3.Row]) -> list[tuple[str, float]]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        source = str(row["source"] or "").strip()
+        if not source:
+            continue
+        totals[source] = totals.get(source, 0.0) + abs(db.amount_value(row["amount"]))
+    return sorted(totals.items(), key=lambda item: item[0].lower())
+
+
+def bank_ledger_filter_form(filters: dict[str, str], source_summary: list[tuple[str, float]]) -> str:
+    selected_source = filters.get("source", "")
+    source_options = ['<option value="">All paid by / sources</option>']
+    source_options.extend(
+        f'<option value="{esc(source)}"{" selected" if selected_source == source else ""}>{esc(source)} - {money(total)}</option>'
+        for source, total in source_summary
+    )
+    hidden_fields = ""
+    if filters.get("year"):
+        hidden_fields += f'<input type="hidden" name="year" value="{esc(filters["year"])}">'
+    if filters.get("month"):
+        hidden_fields += f'<input type="hidden" name="month" value="{esc(filters["month"])}">'
+    clear_href = "/bank"
+    query_parts = []
+    if filters.get("year"):
+        query_parts.append(("year", filters["year"]))
+    if filters.get("month"):
+        query_parts.append(("month", filters["month"]))
+    if query_parts:
+        clear_href = f"/bank?{urlencode(query_parts)}"
+    clear_button = f'<a class="button muted compact" href="{esc(clear_href)}">Clear source</a>' if selected_source else ""
+    return f"""
+    <form class="filter-form ledger-filter-form" method="get" action="/bank">
+      {hidden_fields}
+      <label class="wide">Filter source
+        <select name="source">{''.join(source_options)}</select>
+      </label>
+      <button class="button compact" type="submit">Apply</button>
+      {clear_button}
+    </form>
+    """
+
+
 def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
-    rows = filter_bank_rows(db.rows_for_table(conn, "bank_transactions"), filters)
+    all_rows = db.rows_for_table(conn, "bank_transactions")
+    period_rows = filter_rows_by_period(all_rows, "date", filters)
+    rows = filter_bank_rows(all_rows, filters)
     metrics = db.dashboard_metrics(conn)
     signed_values = [db.bank_signed_amount(row) for row in rows]
     deposits = sum(max(value, 0) for value in signed_values)
@@ -1268,7 +1313,8 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
     )
     smart_panel = f'<div class="panel-body">{smart_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
-    content = section_stack(kpis, panel("Smart Transaction Import", smart_panel), panel("New Bank Transaction", form_panel), panel("Bank Ledger", table))
+    ledger_panel = f'<div class="panel-body ledger-filter-body">{bank_ledger_filter_form(filters, bank_source_spend_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
+    content = section_stack(kpis, panel("Smart Transaction Import", smart_panel), panel("New Bank Transaction", form_panel), panel("Bank Ledger", ledger_panel))
     return layout(conn, "Bank", "Ledger", "/bank", content, flash, bank_filter_form(conn, filters))
 
 
@@ -1372,9 +1418,54 @@ def render_transaction_bulk_review(conn, extracted_rows: list[dict], flash: str 
     return layout(conn, "Bulk Transaction Review", "Bank", "/bank", content, flash, '<a class="button muted" href="/bank">Back to bank</a>')
 
 
+def expense_paid_by_summary(rows: list[sqlite3.Row]) -> list[tuple[str, float]]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        paid_by = str(row["paid_by"] or "").strip()
+        if not paid_by:
+            continue
+        totals[paid_by] = totals.get(paid_by, 0.0) + abs(db.amount_value(row["amount"]))
+    return sorted(totals.items(), key=lambda item: item[0].lower())
+
+
+def expense_ledger_filter_form(filters: dict[str, str], paid_by_summary: list[tuple[str, float]]) -> str:
+    selected_paid_by = filters.get("paid_by", "")
+    paid_by_options = ['<option value="">All paid by</option>']
+    paid_by_options.extend(
+        f'<option value="{esc(paid_by)}"{" selected" if selected_paid_by == paid_by else ""}>{esc(paid_by)} - {money(total)}</option>'
+        for paid_by, total in paid_by_summary
+    )
+    hidden_fields = ""
+    if filters.get("year"):
+        hidden_fields += f'<input type="hidden" name="year" value="{esc(filters["year"])}">'
+    if filters.get("month"):
+        hidden_fields += f'<input type="hidden" name="month" value="{esc(filters["month"])}">'
+    clear_href = "/expenses"
+    query_parts = []
+    if filters.get("year"):
+        query_parts.append(("year", filters["year"]))
+    if filters.get("month"):
+        query_parts.append(("month", filters["month"]))
+    if query_parts:
+        clear_href = f"/expenses?{urlencode(query_parts)}"
+    clear_button = f'<a class="button muted compact" href="{esc(clear_href)}">Clear paid by</a>' if selected_paid_by else ""
+    return f"""
+    <form class="filter-form ledger-filter-form" method="get" action="/expenses">
+      {hidden_fields}
+      <label class="wide">Filter paid by
+        <select name="paid_by">{''.join(paid_by_options)}</select>
+      </label>
+      <button class="button compact" type="submit">Apply</button>
+      {clear_button}
+    </form>
+    """
+
+
 def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
-    rows = filter_expense_rows(db.rows_for_table(conn, "expenses"), filters)
+    all_rows = db.rows_for_table(conn, "expenses")
+    period_rows = filter_rows_by_period(all_rows, "date", filters)
+    rows = filter_expense_rows(all_rows, filters)
     total_spend = sum(db.amount_value(row["amount"]) for row in rows)
     scope = period_label(filters)
     kpis = f"""
@@ -1422,7 +1513,8 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
         money_columns={4},
     )
     form_panel = f'<div class="panel-body">{form}</div>'
-    content = section_stack(kpis, panel("New Business Expense", form_panel), panel("Expense Log", table))
+    expense_log_body = f'<div class="panel-body ledger-filter-body">{expense_ledger_filter_form(filters, expense_paid_by_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
+    content = section_stack(kpis, panel("New Business Expense", form_panel), panel("Expense Log", expense_log_body))
     return layout(conn, "Expenses", "Spend", "/expenses", content, flash, expense_filter_form(conn, filters))
 
 
