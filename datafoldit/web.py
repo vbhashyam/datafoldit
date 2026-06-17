@@ -46,6 +46,9 @@ MONTHS = [
     ("11", "November"),
     ("12", "December"),
 ]
+BANK_SORT_KEYS = {"date", "type", "category", "detail", "source", "amount", "signed", "attachment"}
+EXPENSE_SORT_KEYS = {"date", "category", "vendor", "description", "amount", "paid_by", "frequency", "notes", "attachment"}
+PAYROLL_SORT_KEYS = {"month", "name", "vendor", "client", "hours", "gross", "commission", "employee_pay", "credit_date", "paystub_sent", "attachment"}
 
 
 def main() -> None:
@@ -490,18 +493,21 @@ def date_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
 def bank_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters = date_filter_from_query(query)
     filters["source"] = (first(query, "source") or "").strip()
+    add_sort_filters(query, filters, BANK_SORT_KEYS, "date")
     return filters
 
 
 def expense_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters = date_filter_from_query(query)
     filters["paid_by"] = (first(query, "paid_by") or "").strip()
+    add_sort_filters(query, filters, EXPENSE_SORT_KEYS, "date")
     return filters
 
 
 def payroll_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters = date_filter_from_query(query)
     filters["candidate"] = (first(query, "candidate") or "").strip()
+    add_sort_filters(query, filters, PAYROLL_SORT_KEYS, "month")
     return filters
 
 
@@ -510,11 +516,15 @@ def invoice_filter_from_query(query: dict[str, list[str]]) -> dict[str, str]:
     filters["customer"] = (first(query, "customer") or "").strip()
     status = (first(query, "status") or "").strip()
     filters["status"] = status if status in set(INVOICE_STATUS_OPTIONS) else ""
-    sort_key = (first(query, "sort") or "date").strip()
-    filters["sort"] = sort_key if sort_key in INVOICE_SORT_KEYS else "date"
+    add_sort_filters(query, filters, INVOICE_SORT_KEYS, "date")
+    return filters
+
+
+def add_sort_filters(query: dict[str, list[str]], filters: dict[str, str], sort_keys: set[str], default_key: str) -> None:
+    sort_key = (first(query, "sort") or default_key).strip()
+    filters["sort"] = sort_key if sort_key in sort_keys else default_key
     direction = (first(query, "direction") or "desc").strip().lower()
     filters["direction"] = direction if direction in {"asc", "desc"} else "desc"
-    return filters
 
 
 def filter_rows_by_period(rows: list[sqlite3.Row], date_key: str, filters: dict[str, str]) -> list[sqlite3.Row]:
@@ -557,6 +567,56 @@ def filter_expense_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> lis
     if paid_by:
         rows = [row for row in rows if str(row["paid_by"] or "") == paid_by]
     return rows
+
+
+def sort_table_rows(rows: list[sqlite3.Row], filters: dict[str, str], sort_value) -> list[sqlite3.Row]:
+    reverse = filters.get("direction", "desc") == "desc"
+    return sorted(rows, key=sort_value, reverse=reverse)
+
+
+def sort_bank_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    sort_key = filters.get("sort", "date")
+
+    def value(row: sqlite3.Row):
+        if sort_key == "signed":
+            return db.bank_signed_amount(row)
+        if sort_key == "amount":
+            return db.amount_value(row["amount"])
+        if sort_key == "attachment":
+            return str(row["attachment_path"] if "attachment_path" in row.keys() else "").lower()
+        return str(row[sort_key] or "").lower()
+
+    return sort_table_rows(rows, filters, value)
+
+
+def sort_expense_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    sort_key = filters.get("sort", "date")
+
+    def value(row: sqlite3.Row):
+        if sort_key == "amount":
+            return db.amount_value(row["amount"])
+        if sort_key == "attachment":
+            return str(row["attachment_path"] if "attachment_path" in row.keys() else "").lower()
+        return str(row[sort_key] or "").lower()
+
+    return sort_table_rows(rows, filters, value)
+
+
+def sort_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
+    sort_key = filters.get("sort", "month")
+
+    def value(row: sqlite3.Row):
+        if sort_key == "name":
+            return payroll_employee_name(row).lower()
+        if sort_key in {"hours", "gross", "commission", "employee_pay"}:
+            return db.amount_value(row[sort_key])
+        if sort_key == "paystub_sent":
+            return "yes" if str(row["paystub_sent"] or "").upper() == "Y" else "no"
+        if sort_key == "attachment":
+            return str(row["attachment_path"] if "attachment_path" in row.keys() else "").lower()
+        return str(row[sort_key] or "").lower()
+
+    return sort_table_rows(rows, filters, value)
 
 
 def filter_invoice_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[sqlite3.Row]:
@@ -1363,10 +1423,10 @@ def bank_ledger_filter_form(filters: dict[str, str], source_summary: list[tuple[
 
 
 def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
-    filters = filters or {"year": "", "month": ""}
+    filters = {**{"year": "", "month": "", "source": "", "sort": "date", "direction": "desc"}, **(filters or {})}
     all_rows = db.rows_for_table(conn, "bank_transactions")
     period_rows = filter_rows_by_period(all_rows, "date", filters)
-    rows = filter_bank_rows(all_rows, filters)
+    rows = sort_bank_rows(filter_bank_rows(all_rows, filters), filters)
     metrics = db.dashboard_metrics(conn)
     signed_values = [db.bank_signed_amount(row) for row in rows]
     deposits = sum(max(value, 0) for value in signed_values)
@@ -1404,7 +1464,17 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
     </form>
     """
     table = render_table(
-        ["Date", "Type", "Category", "Detail", "Source", "Amount", "Signed", "Attachment", "Action"],
+        [
+            sort_header("Date", "date", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Type", "type", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Category", "category", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Detail", "detail", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Source", "source", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Amount", "amount", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Signed", "signed", filters, "/bank", ["year", "month", "source"]),
+            sort_header("Attachment", "attachment", filters, "/bank", ["year", "month", "source"]),
+            "Action",
+        ],
         [
             [
                 row["date"],
@@ -1426,6 +1496,7 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
         ],
         raw_columns={6, 7, 8},
         money_columns={5, 6},
+        raw_headers=set(range(8)),
     )
     smart_panel = f'<div class="panel-body">{smart_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -1606,10 +1677,10 @@ def expense_ledger_filter_form(filters: dict[str, str], paid_by_summary: list[tu
 
 
 def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
-    filters = filters or {"year": "", "month": ""}
+    filters = {**{"year": "", "month": "", "paid_by": "", "sort": "date", "direction": "desc"}, **(filters or {})}
     all_rows = db.rows_for_table(conn, "expenses")
     period_rows = filter_rows_by_period(all_rows, "date", filters)
-    rows = filter_expense_rows(all_rows, filters)
+    rows = sort_expense_rows(filter_expense_rows(all_rows, filters), filters)
     total_spend = sum(db.amount_value(row["amount"]) for row in rows)
     scope = period_label(filters)
     kpis = f"""
@@ -1637,7 +1708,18 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
     </form>
     """
     table = render_table(
-        ["Date", "Category", "Vendor", "Description", "Amount", "Paid By", "Frequency", "Notes", "Attachment", "Action"],
+        [
+            sort_header("Date", "date", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Category", "category", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Vendor", "vendor", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Description", "description", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Amount", "amount", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Paid By", "paid_by", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Frequency", "frequency", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Notes", "notes", filters, "/expenses", ["year", "month", "paid_by"]),
+            sort_header("Attachment", "attachment", filters, "/expenses", ["year", "month", "paid_by"]),
+            "Action",
+        ],
         [
             [
                 row["date"],
@@ -1660,6 +1742,7 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
         ],
         raw_columns={8, 9},
         money_columns={4},
+        raw_headers=set(range(9)),
     )
     form_panel = f'<div class="panel-body">{form}</div>'
     expense_log_body = f'<div class="panel-body ledger-filter-body">{expense_ledger_filter_form(filters, expense_paid_by_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
@@ -1697,8 +1780,8 @@ def render_expense_edit(conn, expense_id: int, flash: str | None = None) -> str:
 
 
 def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | None = None) -> str:
-    filters = filters or {"year": "", "month": "", "candidate": ""}
-    rows = filter_payroll_rows(db.rows_for_table(conn, "payroll_entries"), filters)
+    filters = {**{"year": "", "month": "", "candidate": "", "sort": "month", "direction": "desc"}, **(filters or {})}
+    rows = sort_payroll_rows(filter_payroll_rows(db.rows_for_table(conn, "payroll_entries"), filters), filters)
     gross = sum(db.amount_value(row["gross"]) for row in rows)
     commission = sum(db.amount_value(row["commission"]) for row in rows)
     employee_pay = sum(db.amount_value(row["employee_pay"]) for row in rows)
@@ -1743,7 +1826,20 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     </form>
     """
     table = render_table(
-        ["Month", "Name", "Vendor", "Client", "Hours", "Gross", "Commission", "Employee Pay", "Credit Date", "Paystub Sent", "Attachment", "Action"],
+        [
+            sort_header("Month", "month", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Name", "name", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Vendor", "vendor", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Client", "client", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Hours", "hours", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Gross", "gross", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Commission", "commission", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Employee Pay", "employee_pay", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Credit Date", "credit_date", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Paystub Sent", "paystub_sent", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Attachment", "attachment", filters, "/payroll", ["year", "month", "candidate"]),
+            "Action",
+        ],
         [
             [
                 row["month"],
@@ -1769,6 +1865,7 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
         ],
         raw_columns={10, 11},
         money_columns={5, 6, 7},
+        raw_headers=set(range(11)),
     )
     paystub_panel = f'<div class="panel-body">{paystub_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -1977,25 +2074,19 @@ def sort_invoice_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[
     return sorted(rows, key=value, reverse=reverse)
 
 
-def invoice_sort_header(label: str, key: str, filters: dict[str, str]) -> str:
-    current_key = filters.get("sort", "date")
+def sort_header(label: str, key: str, filters: dict[str, str], path: str, preserve_keys: list[str]) -> str:
+    current_key = filters.get("sort", "")
     current_direction = filters.get("direction", "desc")
     next_direction = "asc" if current_key != key or current_direction == "desc" else "desc"
-    query = {
-        name: value
-        for name, value in {
-            "year": filters.get("year", ""),
-            "month": filters.get("month", ""),
-            "customer": filters.get("customer", ""),
-            "status": filters.get("status", ""),
-            "sort": key,
-            "direction": next_direction,
-        }.items()
-        if value
-    }
+    query = {name: filters.get(name, "") for name in preserve_keys if filters.get(name)}
+    query.update({"sort": key, "direction": next_direction})
     active = current_key == key
     suffix = f" {current_direction}" if active else ""
-    return f'<a class="sort-link{" active" if active else ""}" href="/invoices?{urlencode(query)}">{esc(label)}<span>{esc(suffix)}</span></a>'
+    return f'<a class="sort-link{" active" if active else ""}" href="{esc(path)}?{urlencode(query)}">{esc(label)}<span>{esc(suffix)}</span></a>'
+
+
+def invoice_sort_header(label: str, key: str, filters: dict[str, str]) -> str:
+    return sort_header(label, key, filters, "/invoices", ["year", "month", "customer", "status"])
 
 
 def invoice_status_inline_control(row) -> str:
