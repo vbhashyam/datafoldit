@@ -453,6 +453,50 @@ th.money {
   font-weight: 800;
 }
 
+.sort-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #aebccc;
+}
+
+.sort-link:hover,
+.sort-link.active {
+  color: #ffffff;
+}
+
+.sort-link span {
+  color: #7cc4ff;
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.status-badge.overdue {
+  background: rgba(239, 68, 68, 0.18);
+  color: #ffb4b4;
+}
+
+.status-badge.due {
+  background: rgba(214, 164, 52, 0.18);
+  color: #ffd27a;
+}
+
+.status-badge.paid {
+  background: rgba(34, 197, 94, 0.18);
+  color: #9bf0b8;
+}
+
 .inline-status-form {
   margin: 0;
   min-width: 150px;
@@ -467,9 +511,36 @@ th.money {
   margin: 0;
 }
 
-.inline-delete-form .button.danger.icon-button {
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-button {
   width: 32px;
   min-height: 32px;
+  padding: 0;
+}
+
+.icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.edit-icon-button {
+  border-color: #40627f;
+  color: #9dd4ff;
+  box-shadow: none;
+}
+
+.edit-icon-button:hover {
+  background: #173957;
+  color: #ffffff;
+  filter: none;
+}
+
+.inline-delete-form .button.danger.icon-button {
   background: #2b1720;
   color: #ffb4b4;
   border: 1px solid #7f2a35;
@@ -482,16 +553,16 @@ th.money {
   filter: none;
 }
 
-.inline-delete-form .button.danger.icon-button svg {
-  width: 15px;
-  height: 15px;
-}
-
 .attachment-links {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.current-attachment {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .bulk-review-table {
