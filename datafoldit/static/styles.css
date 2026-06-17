@@ -437,6 +437,16 @@ tbody tr:hover td {
   background: rgba(255, 255, 255, 0.025);
 }
 
+tbody tr.is-editing td {
+  background: rgba(15, 141, 242, 0.12);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+tbody tr.is-deleting td {
+  background: rgba(255, 91, 106, 0.12);
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
 td.money,
 th.money {
   text-align: right;
@@ -453,6 +463,50 @@ th.money {
   font-weight: 800;
 }
 
+.sort-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #aebccc;
+}
+
+.sort-link:hover,
+.sort-link.active {
+  color: #ffffff;
+}
+
+.sort-link span {
+  color: #7cc4ff;
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.status-badge.overdue {
+  background: rgba(239, 68, 68, 0.18);
+  color: #ffb4b4;
+}
+
+.status-badge.due {
+  background: rgba(214, 164, 52, 0.18);
+  color: #ffd27a;
+}
+
+.status-badge.paid {
+  background: rgba(34, 197, 94, 0.18);
+  color: #9bf0b8;
+}
+
 .inline-status-form {
   margin: 0;
   min-width: 150px;
@@ -467,9 +521,61 @@ th.money {
   margin: 0;
 }
 
-.inline-delete-form .button.danger.icon-button {
+.inline-row-form {
+  display: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-button {
   width: 32px;
   min-height: 32px;
+  padding: 0;
+}
+
+.icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.edit-icon-button {
+  border-color: #40627f;
+  color: #9dd4ff;
+  box-shadow: none;
+}
+
+.edit-icon-button:hover {
+  background: #173957;
+  color: #ffffff;
+  filter: none;
+}
+
+.inline-save-button {
+  background: rgba(18, 185, 88, 0.16);
+  color: #7cf0a7;
+  border: 1px solid rgba(18, 185, 88, 0.48);
+  box-shadow: none;
+}
+
+.inline-save-button:hover {
+  background: #12b958;
+  color: #07120b;
+  filter: none;
+}
+
+.inline-cancel-button {
+  box-shadow: none;
+}
+
+.inline-delete-form .button.danger.icon-button {
   background: #2b1720;
   color: #ffb4b4;
   border: 1px solid #7f2a35;
@@ -482,16 +588,48 @@ th.money {
   filter: none;
 }
 
-.inline-delete-form .button.danger.icon-button svg {
-  width: 15px;
-  height: 15px;
-}
-
 .attachment-links {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.current-attachment {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cell-view {
+  display: inline-block;
+  min-width: 30px;
+  cursor: text;
+}
+
+.cell-view:hover {
+  color: #ffffff;
+  text-decoration: underline;
+  text-decoration-color: rgba(124, 196, 255, 0.55);
+  text-underline-offset: 3px;
+}
+
+.cell-editor {
+  display: none;
+  min-width: 120px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+tr.is-editing .cell-view {
+  display: none;
+}
+
+tr.is-editing .cell-editor {
+  display: block;
+}
+
+tr.is-editing .cell-editor + .cell-editor {
+  margin-top: 6px;
 }
 
 .bulk-review-table {
