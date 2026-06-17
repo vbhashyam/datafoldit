@@ -88,6 +88,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             employee_pay REAL DEFAULT 0,
             credit_date TEXT,
             attachment_path TEXT,
+            paystub_sent TEXT DEFAULT 'N',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -128,6 +129,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "bank_transactions", "attachment_path", "TEXT")
     ensure_column(conn, "expenses", "attachment_path", "TEXT")
     ensure_column(conn, "payroll_entries", "attachment_path", "TEXT")
+    ensure_column(conn, "payroll_entries", "paystub_sent", "TEXT DEFAULT 'N'")
     ensure_primary_account(conn)
     conn.commit()
 
@@ -233,6 +235,35 @@ def delete_bank_transaction(conn: sqlite3.Connection, transaction_id: int) -> No
     audit(conn, "delete", "bank_transaction", transaction_id, {"detail": row["detail"]})
 
 
+def update_bank_transaction(conn: sqlite3.Connection, transaction_id: int, payload: dict[str, Any]) -> None:
+    row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (transaction_id,)).fetchone()
+    if row is None:
+        raise ValueError("Bank transaction was not found")
+    tx_date = normalize_date(payload.get("date")) or row["date"]
+    attachment_path = clean_text(payload.get("attachment_path")) or row["attachment_path"]
+    conn.execute(
+        """
+        UPDATE bank_transactions
+        SET date = ?, month = ?, type = ?, category = ?, detail = ?, source = ?,
+            amount = ?, attachment_path = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            tx_date,
+            tx_date[:7],
+            clean_text(payload.get("type")) or row["type"],
+            clean_text(payload.get("category")),
+            clean_text(payload.get("detail")),
+            clean_text(payload.get("source")),
+            amount_value(payload.get("amount")),
+            attachment_path,
+            clean_text(payload.get("notes")),
+            transaction_id,
+        ),
+    )
+    audit(conn, "update", "bank_transaction", transaction_id, payload)
+
+
 def add_expense(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     expense_date = normalize_date(payload.get("date")) or date.today().isoformat()
     cur = conn.execute(
@@ -266,6 +297,36 @@ def delete_expense(conn: sqlite3.Connection, expense_id: int) -> None:
     audit(conn, "delete", "expense", expense_id, {"vendor": row["vendor"], "description": row["description"]})
 
 
+def update_expense(conn: sqlite3.Connection, expense_id: int, payload: dict[str, Any]) -> None:
+    row = conn.execute("SELECT * FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+    if row is None:
+        raise ValueError("Expense was not found")
+    expense_date = normalize_date(payload.get("date")) or row["date"]
+    attachment_path = clean_text(payload.get("attachment_path")) or row["attachment_path"]
+    conn.execute(
+        """
+        UPDATE expenses
+        SET date = ?, category = ?, vendor = ?, description = ?, amount = ?,
+            paid_by = ?, frequency = ?, attachment_path = ?, notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            expense_date,
+            clean_text(payload.get("category")),
+            clean_text(payload.get("vendor")),
+            clean_text(payload.get("description")),
+            amount_value(payload.get("amount")),
+            clean_text(payload.get("paid_by")),
+            clean_text(payload.get("frequency")),
+            attachment_path,
+            clean_text(payload.get("notes")),
+            expense_id,
+        ),
+    )
+    audit(conn, "update", "expense", expense_id, payload)
+
+
 def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     month = normalize_month(payload.get("month")) or (normalize_date(payload.get("month")) or date.today().isoformat())[:7]
     vendor_pay, pct, hours, gross, commission, employee_pay = payroll_amounts(payload)
@@ -273,8 +334,8 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
         """
         INSERT INTO payroll_entries
             (month, first_name, last_name, vendor, client, job_start, job_end,
-             vendor_pay, pct, hours, gross, commission, employee_pay, credit_date, attachment_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             vendor_pay, pct, hours, gross, commission, employee_pay, credit_date, attachment_path, paystub_sent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             month,
@@ -292,6 +353,7 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             employee_pay,
             normalize_date(payload.get("credit_date")),
             clean_text(payload.get("attachment_path")),
+            normalize_yes_no(payload.get("paystub_sent")),
         ),
     )
     entity_id = int(cur.lastrowid)
@@ -314,6 +376,45 @@ def delete_payroll_entry(conn: sqlite3.Connection, payroll_id: int) -> None:
         payroll_id,
         {"name": f"{row['first_name'] or ''} {row['last_name'] or ''}".strip(), "month": row["month"]},
     )
+
+
+def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dict[str, Any]) -> None:
+    row = conn.execute("SELECT * FROM payroll_entries WHERE id = ?", (payroll_id,)).fetchone()
+    if row is None:
+        raise ValueError("Payroll entry was not found")
+    month = normalize_month(payload.get("month")) or row["month"]
+    vendor_pay, pct, hours, gross, commission, employee_pay = payroll_amounts(payload)
+    attachment_path = clean_text(payload.get("attachment_path")) or row["attachment_path"]
+    conn.execute(
+        """
+        UPDATE payroll_entries
+        SET month = ?, first_name = ?, last_name = ?, vendor = ?, client = ?,
+            job_start = ?, job_end = ?, vendor_pay = ?, pct = ?, hours = ?,
+            gross = ?, commission = ?, employee_pay = ?, credit_date = ?,
+            attachment_path = ?, paystub_sent = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            month,
+            clean_text(payload.get("first_name")),
+            clean_text(payload.get("last_name")),
+            clean_text(payload.get("vendor")),
+            clean_text(payload.get("client")),
+            normalize_date(payload.get("job_start")),
+            normalize_date(payload.get("job_end")),
+            vendor_pay,
+            pct,
+            hours,
+            gross,
+            commission,
+            employee_pay,
+            normalize_date(payload.get("credit_date")),
+            attachment_path,
+            normalize_yes_no(payload.get("paystub_sent")),
+            payroll_id,
+        ),
+    )
+    audit(conn, "update", "payroll_entry", payroll_id, payload)
 
 
 def payroll_amounts(payload: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
@@ -386,6 +487,44 @@ def update_invoice_status(conn: sqlite3.Connection, invoice_id: int, status_valu
         (status, received, 1 if is_void else 0, balance_due, invoice_id),
     )
     audit(conn, "update_status", "invoice", invoice_id, {"status": status_value})
+
+
+def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str, Any]) -> None:
+    row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    if row is None:
+        raise ValueError("Invoice was not found")
+    invoice_date = normalize_date(payload.get("date")) or row["date"]
+    amount = amount_value(payload.get("amount"))
+    status, received, is_void = normalize_invoice_status(payload)
+    balance_due = amount_value(payload.get("balance_due"))
+    if status.lower() == "paid" or received == "Y" or is_void:
+        balance_due = 0.0
+    elif balance_due == 0 and amount:
+        balance_due = amount
+    source_pdf = clean_text(payload.get("source_pdf")) or row["source_pdf"]
+    conn.execute(
+        """
+        UPDATE invoices
+        SET date = ?, invoice_number = ?, customer = ?, is_void = ?, received = ?,
+            due_date = ?, amount = ?, status = ?, balance_due = ?, source_pdf = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            invoice_date,
+            clean_text(payload.get("invoice_number")) or row["invoice_number"],
+            clean_text(payload.get("customer")),
+            1 if is_void else 0,
+            received,
+            normalize_date(payload.get("due_date")),
+            amount,
+            status,
+            balance_due,
+            source_pdf,
+            invoice_id,
+        ),
+    )
+    audit(conn, "update", "invoice", invoice_id, payload)
 
 
 def delete_invoice(conn: sqlite3.Connection, invoice_id: int) -> None:
@@ -479,6 +618,10 @@ def clean_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def normalize_yes_no(value: Any) -> str:
+    return "Y" if bool_value(value) else "N"
 
 
 def amount_value(value: Any) -> float:

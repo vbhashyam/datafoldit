@@ -7,10 +7,12 @@ from openpyxl import load_workbook
 from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
+from datafoldit.paystub_import import parse_paystub_text
 from datafoldit.transaction_import import parse_transaction_text
 from datafoldit.web import (
     add_bank_transaction_batch,
     add_invoice_batch,
+    add_payroll_batch,
     attachment_link,
     filter_bank_rows,
     filter_expense_rows,
@@ -18,10 +20,14 @@ from datafoldit.web import (
     filter_payroll_rows,
     filter_rows_by_period,
     render_bank,
+    render_bank_edit,
+    render_expense_edit,
     render_expenses,
     render_invoice_bulk_review,
+    render_invoice_edit,
     render_invoices,
     render_payroll,
+    render_paystub_review,
     render_transaction_bulk_review,
 )
 
@@ -171,6 +177,126 @@ class DataFoldCoreTests(unittest.TestCase):
         remaining_expense = self.conn.execute("SELECT COUNT(*) AS count FROM expenses WHERE id = ?", (expense_id,)).fetchone()
         self.assertEqual(remaining_bank["count"], 0)
         self.assertEqual(remaining_expense["count"], 0)
+
+    def test_bank_expense_and_invoice_edit_forms_and_updates(self):
+        bank_id = db.add_bank_transaction(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "type": "Expense",
+                "detail": "Original laptop",
+                "source": "Vamsi",
+                "amount": "900",
+                "attachment_path": "/tmp/original-bank.pdf",
+            },
+        )
+        expense_id = db.add_expense(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "vendor": "Original Vendor",
+                "paid_by": "Aditya",
+                "amount": "100",
+            },
+        )
+        invoice_id = db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-28",
+                "invoice_number": "INV-EDIT-001",
+                "customer": "Original Customer",
+                "amount": "1000",
+                "due_date": "2026-06-01",
+                "status": "Not Received",
+            },
+        )
+        payroll_id = db.add_payroll_entry(
+            self.conn,
+            {
+                "month": "2026-05",
+                "first_name": "Original",
+                "last_name": "Employee",
+                "vendor": "Original Vendor",
+                "client": "Original Client",
+                "job_start": "2026-05-01",
+                "job_end": "2026-05-31",
+                "vendor_pay": "60",
+                "pct": "30",
+                "hours": "10",
+                "attachment_path": "/tmp/original-paystub.pdf",
+                "paystub_sent": "N",
+            },
+        )
+        self.assertIn('action="/bank/update"', render_bank_edit(self.conn, bank_id))
+        self.assertIn('action="/expenses/update"', render_expense_edit(self.conn, expense_id))
+        self.assertIn('action="/invoices/update"', render_invoice_edit(self.conn, invoice_id))
+        db.update_bank_transaction(
+            self.conn,
+            bank_id,
+            {"date": "2026-06-01", "type": "Deposit", "detail": "Updated payment", "source": "ACH", "amount": "1250"},
+        )
+        db.update_expense(
+            self.conn,
+            expense_id,
+            {"date": "2026-06-02", "vendor": "Updated Vendor", "paid_by": "Vamsi", "amount": "250"},
+        )
+        db.update_invoice(
+            self.conn,
+            invoice_id,
+            {
+                "date": "2026-06-03",
+                "invoice_number": "INV-EDIT-002",
+                "customer": "Updated Customer",
+                "amount": "1200",
+                "due_date": "2026-06-30",
+                "balance_due": "1200",
+                "status": "Not Received",
+            },
+        )
+        db.update_payroll_entry(
+            self.conn,
+            payroll_id,
+            {
+                "month": "2026-06",
+                "first_name": "Updated",
+                "last_name": "Employee",
+                "vendor": "Updated Vendor",
+                "client": "Updated Client",
+                "job_start": "2026-05-01",
+                "job_end": "2026-05-31",
+                "vendor_pay": "60",
+                "pct": "30",
+                "hours": "20",
+                "gross": "1200",
+                "commission": "360",
+                "employee_pay": "840",
+                "credit_date": "2026-06-10",
+                "paystub_sent": "Yes",
+            },
+        )
+        bank = self.conn.execute("SELECT date, type, detail, amount, attachment_path FROM bank_transactions WHERE id = ?", (bank_id,)).fetchone()
+        expense = self.conn.execute("SELECT date, vendor, paid_by, amount FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        invoice = self.conn.execute("SELECT date, invoice_number, customer, amount, balance_due FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+        payroll = self.conn.execute("SELECT month, first_name, last_name, vendor, client, hours, gross, commission, employee_pay, credit_date, attachment_path, paystub_sent FROM payroll_entries WHERE id = ?", (payroll_id,)).fetchone()
+        self.assertEqual(bank["date"], "2026-06-01")
+        self.assertEqual(bank["type"], "Deposit")
+        self.assertEqual(bank["detail"], "Updated payment")
+        self.assertAlmostEqual(bank["amount"], 1250.0)
+        self.assertEqual(bank["attachment_path"], "/tmp/original-bank.pdf")
+        self.assertEqual(expense["vendor"], "Updated Vendor")
+        self.assertEqual(expense["paid_by"], "Vamsi")
+        self.assertAlmostEqual(expense["amount"], 250.0)
+        self.assertEqual(invoice["invoice_number"], "INV-EDIT-002")
+        self.assertEqual(invoice["customer"], "Updated Customer")
+        self.assertAlmostEqual(invoice["amount"], 1200.0)
+        self.assertAlmostEqual(invoice["balance_due"], 1200.0)
+        self.assertEqual(payroll["month"], "2026-06")
+        self.assertEqual(payroll["first_name"], "Updated")
+        self.assertEqual(payroll["client"], "Updated Client")
+        self.assertAlmostEqual(payroll["hours"], 20.0)
+        self.assertAlmostEqual(payroll["employee_pay"], 840.0)
+        self.assertEqual(payroll["attachment_path"], "/tmp/original-paystub.pdf")
+        self.assertEqual(payroll["paystub_sent"], "Y")
 
     def test_payroll_filters_by_candidate_name(self):
         db.add_payroll_entry(
@@ -373,13 +499,51 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn('type="file" name="attachment" multiple', html)
         self.assertIn("Read Invoice Files", html)
         self.assertNotIn("accept=", html)
-        self.assertIn('class="grid cols-3"', html)
+        self.assertIn('class="grid cols-4"', html)
         self.assertIn("Total Invoice", html)
         self.assertIn("Received", html)
         self.assertIn("Outstanding", html)
+        self.assertIn("Overdue", html)
         self.assertNotIn("Next #", html)
         self.assertIn('<datalist id="customer-options">', html)
         self.assertIn("Dropdown Client LLC", html)
+
+    def test_invoice_ledger_has_sort_headers_overdue_status_and_edit_action(self):
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-01",
+                "invoice_number": "INV-SORT-001",
+                "customer": "Overdue Client",
+                "amount": "100",
+                "due_date": "2020-01-01",
+                "balance_due": "100",
+                "status": "Not Received",
+            },
+        )
+        db.add_invoice(
+            self.conn,
+            {
+                "date": "2026-05-02",
+                "invoice_number": "INV-SORT-002",
+                "customer": "Paid Client",
+                "amount": "200",
+                "due_date": "2020-01-01",
+                "status": "Received",
+            },
+        )
+        html = render_invoices(self.conn, filters={"year": "", "month": "", "customer": "", "status": "", "sort": "amount", "direction": "asc"})
+        self.assertIn("Due Status", html)
+        self.assertIn("Overdue", html)
+        self.assertIn("$100.00", html)
+        self.assertIn('sort=balance_due', html)
+        self.assertIn('sort=invoice_number', html)
+        self.assertIn('id="invoice-row-form-', html)
+        self.assertIn('action="/invoices/update"', html)
+        self.assertIn('class="cell-editor"', html)
+        self.assertIn('inline-save-button', html)
+        self.assertNotIn('/invoices/edit?id=', html)
+        self.assertIn('edit-icon-button', html)
 
     def test_bank_expense_payroll_pages_have_bulk_upload_and_delete_controls(self):
         db.add_bank_transaction(
@@ -419,12 +583,42 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Filter source", bank_html)
         self.assertIn("Vamsi - $42.00", bank_html)
         self.assertIn('/bank/delete', bank_html)
+        self.assertIn('data-inline-edit-toggle', bank_html)
+        self.assertIn('id="bank-row-form-', bank_html)
+        self.assertIn('action="/bank/update"', bank_html)
+        self.assertIn('class="cell-editor"', bank_html)
+        self.assertIn('inline-save-button', bank_html)
+        self.assertIn('inline-save-button" type="submit"', bank_html)
+        self.assertIn('data-inline-edit-cancel', bank_html)
+        self.assertIn('title="Save" hidden', bank_html)
+        self.assertIn('title="Cancel" hidden', bank_html)
+        self.assertNotIn('/bank/edit?id=', bank_html)
+        self.assertIn('href="/bank?sort=amount&direction=asc"', bank_html)
+        self.assertIn('href="/bank?sort=signed&direction=asc"', bank_html)
         self.assertIn('name="attachment" multiple', expenses_html)
         self.assertIn('name="paid_by"', expenses_html)
         self.assertIn("Filter paid by", expenses_html)
         self.assertIn("Aditya - $42.00", expenses_html)
         self.assertIn('/expenses/delete', expenses_html)
+        self.assertIn('id="expense-row-form-', expenses_html)
+        self.assertIn('action="/expenses/update"', expenses_html)
+        self.assertIn('class="cell-editor"', expenses_html)
+        self.assertIn('inline-save-button', expenses_html)
+        self.assertNotIn('/expenses/edit?id=', expenses_html)
+        self.assertIn('href="/expenses?sort=vendor&direction=asc"', expenses_html)
+        self.assertIn('href="/expenses?sort=amount&direction=asc"', expenses_html)
         self.assertIn('name="attachment" multiple', payroll_html)
+        self.assertIn("Read Paystub Files", payroll_html)
+        self.assertIn("Paystub Sent", payroll_html)
+        self.assertIn('href="/payroll?sort=name&direction=asc"', payroll_html)
+        self.assertIn('href="/payroll?sort=gross&direction=asc"', payroll_html)
+        self.assertIn('id="payroll-row-form-', payroll_html)
+        self.assertIn('action="/payroll/update"', payroll_html)
+        self.assertIn('name="first_name"', payroll_html)
+        self.assertIn('name="last_name"', payroll_html)
+        self.assertIn('inline-save-button', payroll_html)
+        self.assertIn('title="Save" hidden', payroll_html)
+        self.assertIn('data-inline-edit-cancel', payroll_html)
         self.assertIn("Candidate Name", payroll_html)
         self.assertIn('name="candidate"', payroll_html)
         self.assertIn("All candidates", payroll_html)
@@ -439,6 +633,65 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Rao", payroll_html)
         self.assertIn("Acme Client", payroll_html)
         self.assertIn('/payroll/delete', payroll_html)
+
+    def test_paystub_parser_review_and_bulk_save(self):
+        text = """
+        DATAFOLDIT LLC
+        Name
+        Ajitha Bodapothula
+        Payment Date
+        03 Jun 2026
+        Pay Period
+        01 Apr 2026 - 30 Apr 2026
+        Primary Job Role Regular Pay
+        $45.50 Per Hour
+        176 hr
+        $8,008.00
+        Total Gross Pay
+        Net Pay (Total Gross Pay - Total Deduction)
+        $6,555.50
+        """
+        parsed = parse_paystub_text(text)
+        self.assertEqual(parsed["month"], "2026-04")
+        self.assertEqual(parsed["first_name"], "Ajitha")
+        self.assertEqual(parsed["last_name"], "Bodapothula")
+        self.assertEqual(parsed["credit_date"], "2026-06-03")
+        self.assertAlmostEqual(parsed["vendor_pay"], 45.50, places=2)
+        self.assertAlmostEqual(parsed["hours"], 176.0, places=2)
+        self.assertAlmostEqual(parsed["gross"], 8008.0, places=2)
+        self.assertAlmostEqual(parsed["employee_pay"], 6555.50, places=2)
+        self.assertEqual(parsed["paystub_sent"], "Y")
+        parsed["attachment_path"] = "/tmp/paystub.pdf"
+        html = render_paystub_review(self.conn, parsed)
+        self.assertIn("Review Imported Paystub", html)
+        self.assertIn("Ajitha", html)
+        saved = add_payroll_batch(
+            self.conn,
+            {
+                "row_count": ["1"],
+                "include_0": ["on"],
+                "month_0": [parsed["month"]],
+                "first_name_0": [parsed["first_name"]],
+                "last_name_0": [parsed["last_name"]],
+                "vendor_0": [parsed["vendor"]],
+                "client_0": [parsed["client"]],
+                "job_start_0": [parsed["job_start"]],
+                "job_end_0": [parsed["job_end"]],
+                "vendor_pay_0": [str(parsed["vendor_pay"])],
+                "pct_0": [str(parsed["pct"])],
+                "hours_0": [str(parsed["hours"])],
+                "gross_0": [str(parsed["gross"])],
+                "commission_0": [str(parsed["commission"])],
+                "employee_pay_0": [str(parsed["employee_pay"])],
+                "credit_date_0": [parsed["credit_date"]],
+                "attachment_path_0": [parsed["attachment_path"]],
+                "paystub_sent_0": ["Y"],
+            },
+        )
+        self.assertEqual(saved, 1)
+        row = self.conn.execute("SELECT first_name, paystub_sent, gross FROM payroll_entries WHERE first_name = 'Ajitha'").fetchone()
+        self.assertEqual(row["paystub_sent"], "Y")
+        self.assertAlmostEqual(row["gross"], 8008.0, places=2)
 
     def test_bulk_bank_review_and_save_selected_rows(self):
         html = render_transaction_bulk_review(

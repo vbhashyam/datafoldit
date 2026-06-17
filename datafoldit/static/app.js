@@ -31,6 +31,64 @@
     setMoney(form, "employee_pay", employeePay);
   }
 
+  function rowEditors(row) {
+    return Array.prototype.slice.call(row.querySelectorAll(".cell-editor"));
+  }
+
+  function setActionState(row, editing) {
+    var editButton = row.querySelector("[data-inline-edit-toggle]");
+    var saveButton = row.querySelector(".inline-save-button");
+    var cancelButton = row.querySelector(".inline-cancel-button");
+    var deleteForm = row.querySelector("[data-inline-delete-form]");
+    if (editButton) {
+      editButton.hidden = editing;
+    }
+    if (saveButton) {
+      saveButton.hidden = !editing;
+    }
+    if (cancelButton) {
+      cancelButton.hidden = !editing;
+    }
+    if (deleteForm) {
+      deleteForm.hidden = editing;
+    }
+  }
+
+  function resetRowEditors(row) {
+    rowEditors(row).forEach(function (editor) {
+      if (editor.getAttribute("data-original") !== null) {
+        editor.value = editor.getAttribute("data-original");
+      }
+    });
+  }
+
+  function setRowEditing(row, editing, focusEditor) {
+    if (!row) {
+      return;
+    }
+    row.classList.toggle("is-editing", editing);
+    rowEditors(row).forEach(function (editor) {
+      editor.disabled = !editing;
+    });
+    setActionState(row, editing);
+    if (editing && focusEditor) {
+      focusEditor.focus();
+      if (typeof focusEditor.select === "function" && focusEditor.tagName !== "SELECT") {
+        focusEditor.select();
+      }
+    }
+  }
+
+  function closeInlineEdits(exceptRow) {
+    document.querySelectorAll("[data-inline-edit-row]").forEach(function (row) {
+      if (exceptRow && row === exceptRow) {
+        return;
+      }
+      resetRowEditors(row);
+      setRowEditing(row, false);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     document.querySelectorAll("[data-auto-upload-form]").forEach(function (uploadForm) {
       var fileInput = uploadForm.querySelector("[data-auto-submit-file]");
@@ -67,10 +125,61 @@
 
     document.querySelectorAll("[data-confirm-message]").forEach(function (confirmForm) {
       confirmForm.addEventListener("submit", function (event) {
-        var message = confirmForm.getAttribute("data-confirm-message") || "Are you sure?";
-        if (!window.confirm(message)) {
-          event.preventDefault();
+        if (confirmForm.getAttribute("data-confirmed") === "true") {
+          return;
         }
+        event.preventDefault();
+        var message = confirmForm.getAttribute("data-confirm-message") || "Are you sure?";
+        var row = confirmForm.closest("tr");
+        if (row) {
+          closeInlineEdits();
+          row.classList.add("is-deleting");
+        }
+        window.setTimeout(function () {
+          if (window.confirm(message)) {
+            confirmForm.setAttribute("data-confirmed", "true");
+            confirmForm.submit();
+          } else if (row) {
+            row.classList.remove("is-deleting");
+          }
+        }, 30);
+      });
+    });
+
+    document.querySelectorAll("[data-inline-edit-toggle]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var row = button.closest("tr");
+        if (!row) {
+          return;
+        }
+        var firstInput = row.querySelector(".cell-editor");
+        closeInlineEdits(row);
+        setRowEditing(row, true, firstInput);
+      });
+    });
+
+    document.querySelectorAll("[data-inline-edit-cancel]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var row = button.closest("tr");
+        if (row) {
+          resetRowEditors(row);
+          setRowEditing(row, false);
+        }
+      });
+    });
+
+    document.querySelectorAll(".cell-view").forEach(function (view) {
+      view.addEventListener("click", function () {
+        var row = view.closest("tr");
+        if (!row) {
+          return;
+        }
+        var editor = view.parentElement ? view.parentElement.querySelector(".cell-editor") : null;
+        if (!editor) {
+          return;
+        }
+        closeInlineEdits(row);
+        setRowEditing(row, true, editor);
       });
     });
 
