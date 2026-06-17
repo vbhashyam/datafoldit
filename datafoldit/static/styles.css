@@ -525,6 +525,10 @@ th.money {
   display: none;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .row-actions {
   display: inline-flex;
   align-items: center;
