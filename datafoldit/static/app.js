@@ -31,18 +31,61 @@
     setMoney(form, "employee_pay", employeePay);
   }
 
-  function closeInlineEdits(exceptTarget) {
-    document.querySelectorAll(".inline-edit-row").forEach(function (editRow) {
-      if (exceptTarget && editRow === exceptTarget) {
-        return;
+  function rowEditors(row) {
+    return Array.prototype.slice.call(row.querySelectorAll(".cell-editor"));
+  }
+
+  function setActionState(row, editing) {
+    var editButton = row.querySelector("[data-inline-edit-toggle]");
+    var saveButton = row.querySelector(".inline-save-button");
+    var cancelButton = row.querySelector(".inline-cancel-button");
+    var deleteForm = row.querySelector("[data-inline-delete-form]");
+    if (editButton) {
+      editButton.hidden = editing;
+    }
+    if (saveButton) {
+      saveButton.hidden = !editing;
+    }
+    if (cancelButton) {
+      cancelButton.hidden = !editing;
+    }
+    if (deleteForm) {
+      deleteForm.hidden = editing;
+    }
+  }
+
+  function resetRowEditors(row) {
+    rowEditors(row).forEach(function (editor) {
+      if (editor.getAttribute("data-original") !== null) {
+        editor.value = editor.getAttribute("data-original");
       }
-      editRow.hidden = true;
     });
-    document.querySelectorAll("[data-ledger-row]").forEach(function (row) {
-      if (exceptTarget && row.nextElementSibling === exceptTarget) {
+  }
+
+  function setRowEditing(row, editing, focusEditor) {
+    if (!row) {
+      return;
+    }
+    row.classList.toggle("is-editing", editing);
+    rowEditors(row).forEach(function (editor) {
+      editor.disabled = !editing;
+    });
+    setActionState(row, editing);
+    if (editing && focusEditor) {
+      focusEditor.focus();
+      if (typeof focusEditor.select === "function" && focusEditor.tagName !== "SELECT") {
+        focusEditor.select();
+      }
+    }
+  }
+
+  function closeInlineEdits(exceptRow) {
+    document.querySelectorAll("[data-inline-edit-row]").forEach(function (row) {
+      if (exceptRow && row === exceptRow) {
         return;
       }
-      row.classList.remove("is-editing");
+      resetRowEditors(row);
+      setRowEditing(row, false);
     });
   }
 
@@ -105,45 +148,38 @@
 
     document.querySelectorAll("[data-inline-edit-toggle]").forEach(function (button) {
       button.addEventListener("click", function () {
-        var targetId = button.getAttribute("data-target");
-        if (!targetId) {
-          return;
-        }
-        var target = document.getElementById(targetId);
-        if (!target) {
-          return;
-        }
         var row = button.closest("tr");
-        var shouldOpen = target.hidden;
-        closeInlineEdits(target);
-        if (shouldOpen) {
-          target.hidden = false;
-          if (row) {
-            row.classList.add("is-editing");
-          }
-          var firstInput = target.querySelector("input:not([type='hidden']), select, textarea");
-          if (firstInput) {
-            firstInput.focus();
-          }
-        } else {
-          target.hidden = true;
-          if (row) {
-            row.classList.remove("is-editing");
-          }
+        if (!row) {
+          return;
         }
+        var firstInput = row.querySelector(".cell-editor");
+        closeInlineEdits(row);
+        setRowEditing(row, true, firstInput);
       });
     });
 
     document.querySelectorAll("[data-inline-edit-cancel]").forEach(function (button) {
       button.addEventListener("click", function () {
-        var editRow = button.closest(".inline-edit-row");
-        if (editRow) {
-          editRow.hidden = true;
-          var row = editRow.previousElementSibling;
-          if (row) {
-            row.classList.remove("is-editing");
-          }
+        var row = button.closest("tr");
+        if (row) {
+          resetRowEditors(row);
+          setRowEditing(row, false);
         }
+      });
+    });
+
+    document.querySelectorAll(".cell-view").forEach(function (view) {
+      view.addEventListener("click", function () {
+        var row = view.closest("tr");
+        if (!row) {
+          return;
+        }
+        var editor = view.parentElement ? view.parentElement.querySelector(".cell-editor") : null;
+        if (!editor) {
+          return;
+        }
+        closeInlineEdits(row);
+        setRowEditing(row, true, editor);
       });
     });
 

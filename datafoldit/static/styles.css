@@ -447,28 +447,6 @@ tbody tr.is-deleting td {
   box-shadow: inset 3px 0 0 var(--red);
 }
 
-.inline-edit-row td {
-  padding: 0;
-  background: rgba(8, 16, 26, 0.88);
-}
-
-.inline-edit-panel {
-  border-top: 1px solid rgba(124, 196, 255, 0.22);
-  border-bottom: 1px solid rgba(124, 196, 255, 0.22);
-  padding: 16px 18px 18px;
-}
-
-.inline-edit-form {
-  gap: 12px 14px;
-}
-
-.inline-edit-form input,
-.inline-edit-form select,
-.inline-edit-form textarea {
-  min-height: 36px;
-  padding: 7px 9px;
-}
-
 td.money,
 th.money {
   text-align: right;
@@ -543,6 +521,10 @@ th.money {
   margin: 0;
 }
 
+.inline-row-form {
+  display: none;
+}
+
 .row-actions {
   display: inline-flex;
   align-items: center;
@@ -572,6 +554,23 @@ th.money {
   filter: none;
 }
 
+.inline-save-button {
+  background: rgba(18, 185, 88, 0.16);
+  color: #7cf0a7;
+  border: 1px solid rgba(18, 185, 88, 0.48);
+  box-shadow: none;
+}
+
+.inline-save-button:hover {
+  background: #12b958;
+  color: #07120b;
+  filter: none;
+}
+
+.inline-cancel-button {
+  box-shadow: none;
+}
+
 .inline-delete-form .button.danger.icon-button {
   background: #2b1720;
   color: #ffb4b4;
@@ -595,6 +594,34 @@ th.money {
 .current-attachment {
   color: var(--muted);
   font-size: 13px;
+}
+
+.cell-view {
+  display: inline-block;
+  min-width: 30px;
+  cursor: text;
+}
+
+.cell-view:hover {
+  color: #ffffff;
+  text-decoration: underline;
+  text-decoration-color: rgba(124, 196, 255, 0.55);
+  text-underline-offset: 3px;
+}
+
+.cell-editor {
+  display: none;
+  min-width: 120px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+tr.is-editing .cell-view {
+  display: none;
+}
+
+tr.is-editing .cell-editor {
+  display: block;
 }
 
 .bulk-review-table {

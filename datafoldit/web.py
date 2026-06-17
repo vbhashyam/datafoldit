@@ -1465,26 +1465,28 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
     """
     table_rows = []
     row_attrs = []
-    detail_rows = []
     for row in rows:
-        edit_row_id = f"bank-edit-{row['id']}"
+        form_id = f"bank-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"bank-row-{row['id']}"))
-        detail_rows.append(inline_edit_row(edit_row_id, 9, bank_inline_edit_form(row)))
         table_rows.append(
             [
-                row["date"],
-                row["type"],
-                row["category"],
-                row["detail"],
-                row["source"],
-                money(row["amount"]),
+                editable_input(form_id, "date", row["date"], row["date"], "date", required=True),
+                editable_select(form_id, "type", row["type"], TRANSACTION_TYPE_OPTIONS, row["type"], required=True),
+                editable_input(form_id, "category", row["category"], row["category"]),
+                editable_input(form_id, "detail", row["detail"], row["detail"]),
+                editable_input(form_id, "source", row["source"], row["source"]),
+                editable_input(form_id, "amount", money(row["amount"]), currency_input(row["amount"]), "number", step="0.01", required=True),
                 signed_money(db.bank_signed_amount(row)),
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
                 action_controls(
-                    edit_row_id,
+                    form_id,
+                    "/bank/update",
+                    "transaction_id",
+                    row["id"],
                     delete_control("/bank/delete", "transaction_id", row["id"], row["detail"] or row["date"], "transaction"),
                     row["detail"] or row["date"],
                     "transaction",
+                    hidden_fields=[("notes", row["notes"])],
                 ),
             ]
         )
@@ -1501,11 +1503,10 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
             "Action",
         ],
         table_rows,
-        raw_columns={6, 7, 8},
+        raw_columns=set(range(9)),
         money_columns={5, 6},
         raw_headers=set(range(8)),
         row_attrs=row_attrs,
-        detail_rows=detail_rows,
     )
     smart_panel = f'<div class="panel-body">{smart_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -1718,24 +1719,25 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
     """
     table_rows = []
     row_attrs = []
-    detail_rows = []
     for row in rows:
-        edit_row_id = f"expense-edit-{row['id']}"
+        form_id = f"expense-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"expense-row-{row['id']}"))
-        detail_rows.append(inline_edit_row(edit_row_id, 10, expense_inline_edit_form(row)))
         table_rows.append(
             [
-                row["date"],
-                row["category"],
-                row["vendor"],
-                row["description"],
-                money(row["amount"]),
-                row["paid_by"],
-                row["frequency"],
-                row["notes"],
+                editable_input(form_id, "date", row["date"], row["date"], "date", required=True),
+                editable_input(form_id, "category", row["category"], row["category"]),
+                editable_input(form_id, "vendor", row["vendor"], row["vendor"]),
+                editable_input(form_id, "description", row["description"], row["description"]),
+                editable_input(form_id, "amount", money(row["amount"]), currency_input(row["amount"]), "number", step="0.01", required=True),
+                editable_input(form_id, "paid_by", row["paid_by"], row["paid_by"]),
+                editable_select(form_id, "frequency", row["frequency"], ["One-time", "Monthly", "Yearly", "Recurring"], row["frequency"]),
+                editable_input(form_id, "notes", row["notes"], row["notes"]),
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
                 action_controls(
-                    edit_row_id,
+                    form_id,
+                    "/expenses/update",
+                    "expense_id",
+                    row["id"],
                     delete_control("/expenses/delete", "expense_id", row["id"], row["vendor"] or row["description"] or row["date"], "expense"),
                     row["vendor"] or row["description"] or row["date"],
                     "expense",
@@ -1756,11 +1758,10 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
             "Action",
         ],
         table_rows,
-        raw_columns={8, 9},
+        raw_columns=set(range(10)),
         money_columns={4},
         raw_headers=set(range(9)),
         row_attrs=row_attrs,
-        detail_rows=detail_rows,
     )
     form_panel = f'<div class="panel-body">{form}</div>'
     expense_log_body = f'<div class="panel-body ledger-filter-body">{expense_ledger_filter_form(filters, expense_paid_by_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
@@ -2136,7 +2137,7 @@ def delete_control(action: str, id_name: str, id_value, label: str, entity: str)
 
 def edit_control(target_id: str, label: str, entity: str) -> str:
     return f"""
-    <button class="button muted compact icon-button edit-icon-button" type="button" data-inline-edit-toggle data-target="{esc(target_id)}" aria-label="Edit {esc(entity)} {esc(label)}" title="Edit">
+    <button class="button muted compact icon-button edit-icon-button" type="button" data-inline-edit-toggle aria-label="Edit {esc(entity)} {esc(label)}" title="Edit">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4z"></path>
         <path d="M13 6l5 5"></path>
@@ -2145,100 +2146,98 @@ def edit_control(target_id: str, label: str, entity: str) -> str:
     """
 
 
-def action_controls(edit_target_id: str, delete_html: str, label: str, entity: str) -> str:
+def save_control(form_id: str, label: str, entity: str) -> str:
+    return f"""
+    <button class="button compact icon-button inline-save-button" type="submit" form="{esc(form_id)}" aria-label="Save {esc(entity)} {esc(label)}" title="Save" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 6L9 17l-5-5"></path>
+      </svg>
+    </button>
+    """
+
+
+def cancel_control(label: str, entity: str) -> str:
+    return f"""
+    <button class="button secondary compact icon-button inline-cancel-button" type="button" data-inline-edit-cancel aria-label="Cancel {esc(entity)} {esc(label)}" title="Cancel" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M18 6L6 18"></path>
+        <path d="M6 6l12 12"></path>
+      </svg>
+    </button>
+    """
+
+
+def row_form(form_id: str, action: str, id_name: str, id_value, hidden_fields: list[tuple[str, str | None]] | None = None) -> str:
+    hidden_html = "".join(
+        f'<input type="hidden" name="{esc(name)}" value="{esc(value or "")}">'
+        for name, value in (hidden_fields or [])
+    )
+    return f"""
+    <form id="{esc(form_id)}" class="inline-row-form" method="post" action="{esc(action)}">
+      <input type="hidden" name="{esc(id_name)}" value="{esc(id_value)}">
+      {hidden_html}
+    </form>
+    """
+
+
+def action_controls(
+    form_id: str,
+    action: str,
+    id_name: str,
+    id_value,
+    delete_html: str,
+    label: str,
+    entity: str,
+    hidden_fields: list[tuple[str, str | None]] | None = None,
+) -> str:
     return (
-        '<span class="row-actions">'
-        + edit_control(edit_target_id, label, entity)
+        '<div class="row-actions">'
+        + row_form(form_id, action, id_name, id_value, hidden_fields)
+        + edit_control(form_id, label, entity)
+        + save_control(form_id, label, entity)
+        + cancel_control(label, entity)
         + delete_html
-        + "</span>"
+        + "</div>"
     )
 
 
-def inline_edit_row(row_id: str, column_count: int, form_html: str) -> str:
-    return f"""
-    <tr class="inline-edit-row" id="{esc(row_id)}" hidden>
-      <td colspan="{column_count}">
-        <div class="inline-edit-panel">{form_html}</div>
-      </td>
-    </tr>
-    """
-
-
 def ledger_row_attr(row_id: str) -> str:
-    return f'data-ledger-row="{esc(row_id)}"'
+    return f'data-ledger-row="{esc(row_id)}" data-inline-edit-row'
 
 
-def bank_inline_edit_form(row) -> str:
-    current_attachment = attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None) or "No attachment"
-    return f"""
-    <form method="post" action="/bank/update" enctype="multipart/form-data" class="form-grid inline-edit-form">
-      <input type="hidden" name="transaction_id" value="{esc(row["id"])}">
-      {input_field("date", "Date", "date", value=row["date"], required=True)}
-      {select_field("type", "Type", TRANSACTION_TYPE_OPTIONS, selected=row["type"], required=True)}
-      {input_field("category", "Category", "text", value=row["category"])}
-      {input_field("amount", "Amount", "number", value=currency_input(row["amount"]), step="0.01", required=True)}
-      {input_field("detail", "Vendor / Detail", "text", value=row["detail"], css="span-2")}
-      {input_field("source", "Paid By / Source", "text", value=row["source"])}
-      {input_field("notes", "Notes", "text", value=row["notes"])}
-      <label class="span-4">Add / replace attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      <div class="span-4 current-attachment"><strong>Current attachment:</strong> {current_attachment}</div>
-      <div class="span-4 actions">
-        <button class="button compact" type="submit">Update transaction</button>
-        <button class="button secondary compact" type="button" data-inline-edit-cancel>Cancel</button>
-      </div>
-    </form>
-    """
+def editable_input(
+    form_id: str,
+    name: str,
+    display,
+    value: str | None = None,
+    input_type: str = "text",
+    step: str | None = None,
+    required: bool = False,
+) -> str:
+    editor_value = "" if value is None else str(value)
+    display_value = display if display not in {None, ""} else editor_value
+    step_attr = f' step="{esc(step)}"' if step else ""
+    required_attr = " required" if required else ""
+    return (
+        f'<span class="cell-view">{esc(display_value)}</span>'
+        f'<input class="cell-editor" type="{esc(input_type)}" name="{esc(name)}" '
+        f'value="{esc(editor_value)}" form="{esc(form_id)}" data-original="{esc(editor_value)}"'
+        f'{step_attr}{required_attr} disabled>'
+    )
 
 
-def expense_inline_edit_form(row) -> str:
-    current_attachment = attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None) or "No attachment"
-    return f"""
-    <form method="post" action="/expenses/update" enctype="multipart/form-data" class="form-grid inline-edit-form">
-      <input type="hidden" name="expense_id" value="{esc(row["id"])}">
-      {input_field("date", "Date", "date", value=row["date"], required=True)}
-      {input_field("category", "Category", "text", value=row["category"])}
-      {input_field("vendor", "Vendor", "text", value=row["vendor"])}
-      {input_field("amount", "Amount", "number", value=currency_input(row["amount"]), step="0.01", required=True)}
-      {input_field("description", "Description", "text", value=row["description"], css="span-2")}
-      {input_field("paid_by", "Paid By", "text", value=row["paid_by"])}
-      {select_field("frequency", "Frequency", ["One-time", "Monthly", "Yearly", "Recurring"], selected=row["frequency"])}
-      <label class="span-4">Add / replace attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      {textarea_field("notes", "Notes", "span-4", value=row["notes"])}
-      <div class="span-4 current-attachment"><strong>Current attachment:</strong> {current_attachment}</div>
-      <div class="span-4 actions">
-        <button class="button compact" type="submit">Update expense</button>
-        <button class="button secondary compact" type="button" data-inline-edit-cancel>Cancel</button>
-      </div>
-    </form>
-    """
-
-
-def invoice_inline_edit_form(conn, row) -> str:
-    current_attachment = attachment_link(row["source_pdf"] if "source_pdf" in row.keys() else None) or "No attachment"
-    return f"""
-    <form method="post" action="/invoices/update" enctype="multipart/form-data" class="form-grid inline-edit-form">
-      <input type="hidden" name="invoice_id" value="{esc(row["id"])}">
-      {input_field("date", "Date", "date", value=row["date"], required=True)}
-      {input_field("invoice_number", "Invoice #", "text", value=row["invoice_number"], required=True)}
-      {input_field("customer", "Customer / Client", "text", value=row["customer"], required=True)}
-      {input_field("amount", "Amount", "number", value=currency_input(row["amount"]), step="0.01", required=True)}
-      {input_field("due_date", "Due Date", "date", value=row["due_date"])}
-      {invoice_status_select(invoice_status_label(row))}
-      {input_field("balance_due", "Balance Due", "number", value=currency_input(row["balance_due"]), step="0.01")}
-      <label class="span-4">Add / replace attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      <div class="span-4 current-attachment"><strong>Current attachment:</strong> {current_attachment}</div>
-      <div class="span-4 actions">
-        <button class="button compact" type="submit">Update invoice</button>
-        <button class="button secondary compact" type="button" data-inline-edit-cancel>Cancel</button>
-      </div>
-    </form>
-    """
+def editable_select(form_id: str, name: str, display, options: list[str], selected: str | None = None, required: bool = False) -> str:
+    selected_value = selected or ""
+    required_attr = " required" if required else ""
+    option_html = '<option value=""></option>' + "".join(
+        f'<option value="{esc(option)}"{" selected" if selected_value == option else ""}>{esc(option)}</option>'
+        for option in options
+    )
+    return (
+        f'<span class="cell-view">{esc(display or selected_value)}</span>'
+        f'<select class="cell-editor" name="{esc(name)}" form="{esc(form_id)}" data-original="{esc(selected_value)}"{required_attr} disabled>'
+        f'{option_html}</select>'
+    )
 
 
 def invoice_delete_control(row) -> str:
@@ -2322,24 +2321,25 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     """
     table_rows = []
     row_attrs = []
-    detail_rows = []
     for row in rows:
-        edit_row_id = f"invoice-edit-{row['id']}"
+        form_id = f"invoice-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"invoice-row-{row['id']}"))
-        detail_rows.append(inline_edit_row(edit_row_id, 10, invoice_inline_edit_form(conn, row)))
         table_rows.append(
             [
-                row["date"],
-                row["invoice_number"],
-                row["customer"],
-                invoice_status_inline_control(row),
+                editable_input(form_id, "date", row["date"], row["date"], "date", required=True),
+                editable_input(form_id, "invoice_number", row["invoice_number"], row["invoice_number"], required=True),
+                editable_input(form_id, "customer", row["customer"], row["customer"], required=True),
+                editable_select(form_id, "status", invoice_status_label(row), INVOICE_STATUS_OPTIONS, invoice_status_label(row), required=True),
                 invoice_due_status_badge(row),
-                row["due_date"],
-                money(row["amount"]),
-                money(row["balance_due"]),
+                editable_input(form_id, "due_date", row["due_date"], row["due_date"], "date"),
+                editable_input(form_id, "amount", money(row["amount"]), currency_input(row["amount"]), "number", step="0.01", required=True),
+                editable_input(form_id, "balance_due", money(row["balance_due"]), currency_input(row["balance_due"]), "number", step="0.01"),
                 attachment_link(row["source_pdf"] if "source_pdf" in row.keys() else None),
                 action_controls(
-                    edit_row_id,
+                    form_id,
+                    "/invoices/update",
+                    "invoice_id",
+                    row["id"],
                     invoice_delete_control(row),
                     row["invoice_number"] or "this invoice",
                     "invoice",
@@ -2360,11 +2360,10 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             "Action",
         ],
         table_rows,
-        raw_columns={3, 4, 8, 9},
+        raw_columns=set(range(10)),
         money_columns={6, 7},
         raw_headers=set(range(9)),
         row_attrs=row_attrs,
-        detail_rows=detail_rows,
     )
     extract_panel = f'<div class="panel-body">{extract_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
