@@ -437,6 +437,38 @@ tbody tr:hover td {
   background: rgba(255, 255, 255, 0.025);
 }
 
+tbody tr.is-editing td {
+  background: rgba(15, 141, 242, 0.12);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+tbody tr.is-deleting td {
+  background: rgba(255, 91, 106, 0.12);
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.inline-edit-row td {
+  padding: 0;
+  background: rgba(8, 16, 26, 0.88);
+}
+
+.inline-edit-panel {
+  border-top: 1px solid rgba(124, 196, 255, 0.22);
+  border-bottom: 1px solid rgba(124, 196, 255, 0.22);
+  padding: 16px 18px 18px;
+}
+
+.inline-edit-form {
+  gap: 12px 14px;
+}
+
+.inline-edit-form input,
+.inline-edit-form select,
+.inline-edit-form textarea {
+  min-height: 36px;
+  padding: 7px 9px;
+}
+
 td.money,
 th.money {
   text-align: right;

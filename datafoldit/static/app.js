@@ -31,6 +31,21 @@
     setMoney(form, "employee_pay", employeePay);
   }
 
+  function closeInlineEdits(exceptTarget) {
+    document.querySelectorAll(".inline-edit-row").forEach(function (editRow) {
+      if (exceptTarget && editRow === exceptTarget) {
+        return;
+      }
+      editRow.hidden = true;
+    });
+    document.querySelectorAll("[data-ledger-row]").forEach(function (row) {
+      if (exceptTarget && row.nextElementSibling === exceptTarget) {
+        return;
+      }
+      row.classList.remove("is-editing");
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     document.querySelectorAll("[data-auto-upload-form]").forEach(function (uploadForm) {
       var fileInput = uploadForm.querySelector("[data-auto-submit-file]");
@@ -67,9 +82,67 @@
 
     document.querySelectorAll("[data-confirm-message]").forEach(function (confirmForm) {
       confirmForm.addEventListener("submit", function (event) {
+        if (confirmForm.getAttribute("data-confirmed") === "true") {
+          return;
+        }
+        event.preventDefault();
         var message = confirmForm.getAttribute("data-confirm-message") || "Are you sure?";
-        if (!window.confirm(message)) {
-          event.preventDefault();
+        var row = confirmForm.closest("tr");
+        if (row) {
+          closeInlineEdits();
+          row.classList.add("is-deleting");
+        }
+        window.setTimeout(function () {
+          if (window.confirm(message)) {
+            confirmForm.setAttribute("data-confirmed", "true");
+            confirmForm.submit();
+          } else if (row) {
+            row.classList.remove("is-deleting");
+          }
+        }, 30);
+      });
+    });
+
+    document.querySelectorAll("[data-inline-edit-toggle]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var targetId = button.getAttribute("data-target");
+        if (!targetId) {
+          return;
+        }
+        var target = document.getElementById(targetId);
+        if (!target) {
+          return;
+        }
+        var row = button.closest("tr");
+        var shouldOpen = target.hidden;
+        closeInlineEdits(target);
+        if (shouldOpen) {
+          target.hidden = false;
+          if (row) {
+            row.classList.add("is-editing");
+          }
+          var firstInput = target.querySelector("input:not([type='hidden']), select, textarea");
+          if (firstInput) {
+            firstInput.focus();
+          }
+        } else {
+          target.hidden = true;
+          if (row) {
+            row.classList.remove("is-editing");
+          }
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-inline-edit-cancel]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var editRow = button.closest(".inline-edit-row");
+        if (editRow) {
+          editRow.hidden = true;
+          var row = editRow.previousElementSibling;
+          if (row) {
+            row.classList.remove("is-editing");
+          }
         }
       });
     });
