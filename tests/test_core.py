@@ -210,6 +210,23 @@ class DataFoldCoreTests(unittest.TestCase):
                 "status": "Not Received",
             },
         )
+        payroll_id = db.add_payroll_entry(
+            self.conn,
+            {
+                "month": "2026-05",
+                "first_name": "Original",
+                "last_name": "Employee",
+                "vendor": "Original Vendor",
+                "client": "Original Client",
+                "job_start": "2026-05-01",
+                "job_end": "2026-05-31",
+                "vendor_pay": "60",
+                "pct": "30",
+                "hours": "10",
+                "attachment_path": "/tmp/original-paystub.pdf",
+                "paystub_sent": "N",
+            },
+        )
         self.assertIn('action="/bank/update"', render_bank_edit(self.conn, bank_id))
         self.assertIn('action="/expenses/update"', render_expense_edit(self.conn, expense_id))
         self.assertIn('action="/invoices/update"', render_invoice_edit(self.conn, invoice_id))
@@ -236,9 +253,31 @@ class DataFoldCoreTests(unittest.TestCase):
                 "status": "Not Received",
             },
         )
+        db.update_payroll_entry(
+            self.conn,
+            payroll_id,
+            {
+                "month": "2026-06",
+                "first_name": "Updated",
+                "last_name": "Employee",
+                "vendor": "Updated Vendor",
+                "client": "Updated Client",
+                "job_start": "2026-05-01",
+                "job_end": "2026-05-31",
+                "vendor_pay": "60",
+                "pct": "30",
+                "hours": "20",
+                "gross": "1200",
+                "commission": "360",
+                "employee_pay": "840",
+                "credit_date": "2026-06-10",
+                "paystub_sent": "Yes",
+            },
+        )
         bank = self.conn.execute("SELECT date, type, detail, amount, attachment_path FROM bank_transactions WHERE id = ?", (bank_id,)).fetchone()
         expense = self.conn.execute("SELECT date, vendor, paid_by, amount FROM expenses WHERE id = ?", (expense_id,)).fetchone()
         invoice = self.conn.execute("SELECT date, invoice_number, customer, amount, balance_due FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+        payroll = self.conn.execute("SELECT month, first_name, last_name, vendor, client, hours, gross, commission, employee_pay, credit_date, attachment_path, paystub_sent FROM payroll_entries WHERE id = ?", (payroll_id,)).fetchone()
         self.assertEqual(bank["date"], "2026-06-01")
         self.assertEqual(bank["type"], "Deposit")
         self.assertEqual(bank["detail"], "Updated payment")
@@ -251,6 +290,13 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(invoice["customer"], "Updated Customer")
         self.assertAlmostEqual(invoice["amount"], 1200.0)
         self.assertAlmostEqual(invoice["balance_due"], 1200.0)
+        self.assertEqual(payroll["month"], "2026-06")
+        self.assertEqual(payroll["first_name"], "Updated")
+        self.assertEqual(payroll["client"], "Updated Client")
+        self.assertAlmostEqual(payroll["hours"], 20.0)
+        self.assertAlmostEqual(payroll["employee_pay"], 840.0)
+        self.assertEqual(payroll["attachment_path"], "/tmp/original-paystub.pdf")
+        self.assertEqual(payroll["paystub_sent"], "Y")
 
     def test_payroll_filters_by_candidate_name(self):
         db.add_payroll_entry(
@@ -566,6 +612,13 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Paystub Sent", payroll_html)
         self.assertIn('href="/payroll?sort=name&direction=asc"', payroll_html)
         self.assertIn('href="/payroll?sort=gross&direction=asc"', payroll_html)
+        self.assertIn('id="payroll-row-form-', payroll_html)
+        self.assertIn('action="/payroll/update"', payroll_html)
+        self.assertIn('name="first_name"', payroll_html)
+        self.assertIn('name="last_name"', payroll_html)
+        self.assertIn('inline-save-button', payroll_html)
+        self.assertIn('title="Save" hidden', payroll_html)
+        self.assertIn('data-inline-edit-cancel', payroll_html)
         self.assertIn("Candidate Name", payroll_html)
         self.assertIn('name="candidate"', payroll_html)
         self.assertIn("All candidates", payroll_html)

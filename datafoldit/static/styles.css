@@ -628,6 +628,10 @@ tr.is-editing .cell-editor {
   display: block;
 }
 
+tr.is-editing .cell-editor + .cell-editor {
+  margin-top: 6px;
+}
+
 .bulk-review-table {
   min-width: 1180px;
 }

@@ -266,6 +266,10 @@ def make_handler(db_path: Path):
                     db.add_payroll_entry(self.conn, fields)
                     self.conn.commit()
                     self.redirect("/payroll?flash=Payroll+entry+saved")
+                elif parsed.path == "/payroll/update":
+                    db.update_payroll_entry(self.conn, int(fields.get("payroll_id") or 0), fields)
+                    self.conn.commit()
+                    self.redirect("/payroll?flash=Payroll+entry+updated")
                 elif parsed.path == "/payroll/delete":
                     db.delete_payroll_entry(self.conn, int(fields.get("payroll_id") or 0))
                     self.conn.commit()
@@ -1844,6 +1848,49 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
       <div class="span-4 actions"><button class="button" type="submit">Save payroll</button></div>
     </form>
     """
+    table_rows = []
+    row_attrs = []
+    for row in rows:
+        form_id = f"payroll-row-form-{row['id']}"
+        employee_label = payroll_employee_name(row) or row["month"]
+        paystub_sent_label = "Yes" if str(row["paystub_sent"] or "").upper() == "Y" else "No"
+        row_attrs.append(ledger_row_attr(f"payroll-row-{row['id']}"))
+        table_rows.append(
+            [
+                editable_input(form_id, "month", row["month"], row["month"], "month", required=True),
+                editable_name(form_id, row),
+                editable_input(form_id, "vendor", row["vendor"], row["vendor"]),
+                editable_input(form_id, "client", row["client"], row["client"]),
+                editable_input(form_id, "hours", row["hours"], currency_input(row["hours"]), "number", step="0.01"),
+                editable_input(form_id, "gross", money(row["gross"]), currency_input(row["gross"]), "number", step="0.01"),
+                editable_input(form_id, "commission", money(row["commission"]), currency_input(row["commission"]), "number", step="0.01"),
+                editable_input(form_id, "employee_pay", money(row["employee_pay"]), currency_input(row["employee_pay"]), "number", step="0.01"),
+                editable_input(form_id, "credit_date", row["credit_date"], row["credit_date"], "date"),
+                editable_select(form_id, "paystub_sent", paystub_sent_label, ["No", "Yes"], paystub_sent_label),
+                attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
+                action_controls(
+                    form_id,
+                    "/payroll/update",
+                    "payroll_id",
+                    row["id"],
+                    delete_control(
+                        "/payroll/delete",
+                        "payroll_id",
+                        row["id"],
+                        employee_label,
+                        "payroll entry",
+                    ),
+                    employee_label,
+                    "payroll entry",
+                    hidden_fields=[
+                        ("job_start", row["job_start"]),
+                        ("job_end", row["job_end"]),
+                        ("vendor_pay", currency_input(row["vendor_pay"])),
+                        ("pct", currency_input(row["pct"])),
+                    ],
+                ),
+            ]
+        )
     table = render_table(
         [
             sort_header("Month", "month", filters, "/payroll", ["year", "month", "candidate"]),
@@ -1859,32 +1906,11 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
             sort_header("Attachment", "attachment", filters, "/payroll", ["year", "month", "candidate"]),
             "Action",
         ],
-        [
-            [
-                row["month"],
-                f"{row['first_name'] or ''} {row['last_name'] or ''}".strip(),
-                row["vendor"],
-                row["client"],
-                row["hours"],
-                money(row["gross"]),
-                money(row["commission"]),
-                money(row["employee_pay"]),
-                row["credit_date"],
-                "Yes" if str(row["paystub_sent"] or "").upper() == "Y" else "No",
-                attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
-                delete_control(
-                    "/payroll/delete",
-                    "payroll_id",
-                    row["id"],
-                    f"{row['first_name'] or ''} {row['last_name'] or ''}".strip() or row["month"],
-                    "payroll entry",
-                ),
-            ]
-            for row in rows
-        ],
-        raw_columns={10, 11},
+        table_rows,
+        raw_columns=set(range(12)),
         money_columns={5, 6, 7},
         raw_headers=set(range(11)),
+        row_attrs=row_attrs,
     )
     paystub_panel = f'<div class="panel-body">{paystub_form}</div>'
     form_panel = f'<div class="panel-body">{form}</div>'
@@ -2169,7 +2195,7 @@ def cancel_control(label: str, entity: str) -> str:
 
 def row_form(form_id: str, action: str, id_name: str, id_value, hidden_fields: list[tuple[str, str | None]] | None = None) -> str:
     hidden_html = "".join(
-        f'<input type="hidden" name="{esc(name)}" value="{esc(value or "")}">'
+        f'<input type="hidden" name="{esc(name)}" value="{esc("" if value is None else value)}">'
         for name, value in (hidden_fields or [])
     )
     return f"""
@@ -2237,6 +2263,19 @@ def editable_select(form_id: str, name: str, display, options: list[str], select
         f'<span class="cell-view">{esc(display or selected_value)}</span>'
         f'<select class="cell-editor" name="{esc(name)}" form="{esc(form_id)}" data-original="{esc(selected_value)}"{required_attr} disabled>'
         f'{option_html}</select>'
+    )
+
+
+def editable_name(form_id: str, row) -> str:
+    first_name = row["first_name"] or ""
+    last_name = row["last_name"] or ""
+    display_name = payroll_employee_name(row)
+    return (
+        f'<span class="cell-view">{esc(display_name)}</span>'
+        f'<input class="cell-editor" type="text" name="first_name" value="{esc(first_name)}" '
+        f'form="{esc(form_id)}" data-original="{esc(first_name)}" placeholder="First name" disabled>'
+        f'<input class="cell-editor" type="text" name="last_name" value="{esc(last_name)}" '
+        f'form="{esc(form_id)}" data-original="{esc(last_name)}" placeholder="Last name" disabled>'
     )
 
 
