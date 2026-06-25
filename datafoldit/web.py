@@ -6,6 +6,7 @@ from email.parser import BytesParser
 import hashlib
 import hmac
 import html
+import json
 import os
 import re
 import sqlite3
@@ -49,6 +50,12 @@ MONTHS = [
 BANK_SORT_KEYS = {"date", "type", "category", "detail", "source", "amount", "signed", "attachment"}
 EXPENSE_SORT_KEYS = {"date", "category", "vendor", "description", "amount", "paid_by", "frequency", "notes", "attachment"}
 PAYROLL_SORT_KEYS = {"month", "name", "vendor", "client", "hours", "gross", "commission", "employee_pay", "credit_date", "paystub_sent", "attachment"}
+INLINE_EXTRACT_PATHS = {
+    "/bank/extract-inline",
+    "/expenses/extract-inline",
+    "/invoices/extract-inline",
+    "/payroll/extract-inline",
+}
 
 
 def main() -> None:
@@ -172,7 +179,10 @@ def make_handler(db_path: Path):
                     self.redirect("/login?error=Invalid+password")
                 return
             if not self.is_authenticated():
-                self.redirect("/login")
+                if parsed.path in INLINE_EXTRACT_PATHS:
+                    self.send_json({"error": "Login required"}, HTTPStatus.UNAUTHORIZED)
+                else:
+                    self.redirect("/login")
                 return
             try:
                 if parsed.path == "/bank/extract":
@@ -187,6 +197,15 @@ def make_handler(db_path: Path):
                     else:
                         extracted_rows = extract_transaction_batch(saved_paths)
                         self.send_html(render_transaction_bulk_review(self.conn, extracted_rows, "Review extracted transactions before saving"))
+                    return
+                if parsed.path == "/bank/extract-inline":
+                    upload_fields, files = self.read_multipart_form()
+                    uploaded = first_uploaded_file(files.get("attachment"))
+                    if not uploaded:
+                        raise ValueError("Choose an attachment to import")
+                    saved_path = save_uploaded_file(uploaded)
+                    extracted = extract_transaction_from_file(saved_path)
+                    self.send_json(transaction_extract_payload(extracted, saved_path))
                     return
                 if parsed.path == "/invoices/extract":
                     if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
@@ -208,6 +227,15 @@ def make_handler(db_path: Path):
                         raise ValueError("Upload an invoice file or enter a PDF path")
                     extracted = extract_invoice_from_pdf(source_path)
                     self.send_html(render_invoice_review(self.conn, extracted, "Review extracted invoice fields before saving"))
+                    return
+                if parsed.path == "/invoices/extract-inline":
+                    upload_fields, files = self.read_multipart_form()
+                    uploaded = first_uploaded_file(files.get("attachment"))
+                    if not uploaded:
+                        raise ValueError("Choose an invoice file to import")
+                    saved_path = save_uploaded_file(uploaded)
+                    extracted = extract_invoice_from_pdf(saved_path)
+                    self.send_json(invoice_extract_payload(extracted, saved_path))
                     return
                 if parsed.path == "/invoices/create-bulk":
                     saved_count = add_invoice_batch(self.conn, self.read_form())
@@ -231,6 +259,24 @@ def make_handler(db_path: Path):
                     else:
                         extracted_rows = extract_paystub_batch(saved_paths)
                         self.send_html(render_paystub_bulk_review(self.conn, extracted_rows, "Review extracted paystubs before saving"))
+                    return
+                if parsed.path == "/expenses/extract-inline":
+                    upload_fields, files = self.read_multipart_form()
+                    uploaded = first_uploaded_file(files.get("attachment"))
+                    if not uploaded:
+                        raise ValueError("Choose an expense file to import")
+                    saved_path = save_uploaded_file(uploaded)
+                    extracted = extract_transaction_from_file(saved_path)
+                    self.send_json(expense_extract_payload(extracted, saved_path))
+                    return
+                if parsed.path == "/payroll/extract-inline":
+                    upload_fields, files = self.read_multipart_form()
+                    uploaded = first_uploaded_file(files.get("attachment"))
+                    if not uploaded:
+                        raise ValueError("Choose a paystub file to import")
+                    saved_path = save_uploaded_file(uploaded)
+                    extracted = extract_paystub_from_file(saved_path)
+                    self.send_json(payroll_extract_payload(extracted, saved_path))
                     return
                 if parsed.path == "/payroll/create-bulk":
                     saved_count = add_payroll_batch(self.conn, self.read_form())
@@ -302,6 +348,9 @@ def make_handler(db_path: Path):
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
             except Exception as exc:
+                if parsed.path in INLINE_EXTRACT_PATHS:
+                    self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
                 self.redirect(f"{self.headers.get('Referer', '/')}?{urlencode({'flash': 'Error: ' + str(exc)})}")
 
         def handle_export(self, query: dict[str, list[str]]) -> None:
@@ -391,6 +440,14 @@ def make_handler(db_path: Path):
             payload = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def send_json(self, body: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+            payload = json.dumps(body, default=str).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -956,6 +1013,85 @@ def extract_paystub_batch(paths: list[Path]) -> list[dict]:
     return extracted_rows
 
 
+def transaction_extract_payload(extracted: dict, saved_path: Path) -> dict:
+    field_names = ["date", "type", "category", "detail", "source", "amount", "notes"]
+    payload = {
+        name: extracted.get(name)
+        for name in field_names
+        if extracted.get(name) not in (None, "")
+    }
+    payload["attachment_path"] = str(extracted.get("attachment_path") or saved_path)
+    payload["source_name"] = saved_path.name
+    return payload
+
+
+def expense_extract_payload(extracted: dict, saved_path: Path) -> dict:
+    detail = str(extracted.get("detail") or "").strip()
+    payload = {
+        "date": extracted.get("date"),
+        "category": extracted.get("category"),
+        "vendor": detail,
+        "description": detail,
+        "amount": extracted.get("amount"),
+        "paid_by": extracted.get("source"),
+        "notes": extracted.get("notes"),
+        "attachment_path": str(extracted.get("attachment_path") or saved_path),
+        "source_name": saved_path.name,
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "")}
+
+
+def invoice_extract_payload(extracted: dict, saved_path: Path) -> dict:
+    status = invoice_status_choice(
+        str(extracted.get("status") or ""),
+        str(extracted.get("received") or ""),
+        extracted.get("is_void"),
+    )
+    payload = {
+        "date": extracted.get("date"),
+        "invoice_number": extracted.get("invoice_number"),
+        "customer": extracted.get("customer"),
+        "status": status,
+        "due_date": extracted.get("due_date"),
+        "amount": extracted.get("amount"),
+        "balance_due": extracted.get("balance_due"),
+        "source_pdf": str(extracted.get("source_pdf") or saved_path),
+        "source_name": saved_path.name,
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "")}
+
+
+def payroll_extract_payload(extracted: dict, saved_path: Path) -> dict:
+    field_names = [
+        "month",
+        "first_name",
+        "last_name",
+        "vendor",
+        "client",
+        "job_start",
+        "job_end",
+        "vendor_pay",
+        "pct",
+        "hours",
+        "gross",
+        "commission",
+        "employee_pay",
+        "credit_date",
+        "paystub_sent",
+    ]
+    payload = {}
+    for name in field_names:
+        value = extracted.get(name)
+        if value in (None, ""):
+            continue
+        if name == "pct" and not db.amount_value(value):
+            continue
+        payload[name] = value
+    payload["attachment_path"] = str(extracted.get("attachment_path") or saved_path)
+    payload["source_name"] = saved_path.name
+    return payload
+
+
 def add_bank_transaction_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) -> int:
     try:
         row_count = int(form_value(fields, "row_count") or "0")
@@ -1444,31 +1580,41 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
       {metric_card("Outflows", money(outflows), "Visible ledger")}
     </div>
     """
-    smart_form = """
-    <form method="post" action="/bank/extract" enctype="multipart/form-data" class="form-grid">
-      <label class="span-4">Source files
-        <input type="file" name="attachment" multiple required>
-      </label>
-      <div class="span-4 actions"><button class="button secondary" type="submit">Read transaction file(s) and review</button></div>
-    </form>
+    create_form_id = "bank-create-form"
+    create_actions = f"""
+    <div class="row-actions">
+      <form id="{create_form_id}" class="inline-row-form" method="post" action="/bank/create" enctype="multipart/form-data" data-inline-create-form data-bank-form>
+        <input type="hidden" name="notes" value="">
+        <input type="hidden" name="attachment_path" value="">
+      </form>
+      <button class="button compact icon-button inline-save-button" type="submit" form="{create_form_id}" aria-label="Save bank transaction" title="Save">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5"></path>
+        </svg>
+      </button>
+      <button class="button secondary compact icon-button inline-cancel-button" type="button" data-inline-create-cancel aria-label="Cancel bank transaction" title="Cancel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
     """
-    form = f"""
-    <form method="post" action="/bank/create" enctype="multipart/form-data" class="form-grid">
-      {input_field("date", "Date", "date", required=True)}
-      {select_field("type", "Type", TRANSACTION_TYPE_OPTIONS, required=True)}
-      {input_field("category", "Category", "text")}
-      {input_field("amount", "Amount", "number", step="0.01", required=True)}
-      {input_field("detail", "Vendor / Detail", "text", css="span-2")}
-      {datalist_field("source", "Paid By / Source", db.distinct_values(conn, "bank_transactions", "source"))}
-      {input_field("notes", "Notes", "text")}
-      <label class="span-4">Attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      <div class="span-4 actions"><button class="button" type="submit">Save transaction</button></div>
-    </form>
-    """
-    table_rows = []
-    row_attrs = []
+    table_rows = [
+        [
+            create_input(create_form_id, "date", "date", required=True),
+            create_select(create_form_id, "type", TRANSACTION_TYPE_OPTIONS, "Expense"),
+            create_input(create_form_id, "category", "text", placeholder="Category"),
+            create_input(create_form_id, "detail", "text", placeholder="Detail"),
+            create_input(create_form_id, "source", "text", placeholder="Source", list_id="bank-source-options")
+            + datalist_options("bank-source-options", db.distinct_values(conn, "bank_transactions", "source")),
+            create_input(create_form_id, "amount", "number", step="0.01", placeholder="0.00", required=True),
+            '<span class="inline-derived-value" data-bank-inline-signed>--</span>',
+            inline_file_cell(create_form_id, "bank", "/bank/extract-inline"),
+            create_actions,
+        ]
+    ]
+    row_attrs = ['id="bank-create-row" class="inline-create-row" data-inline-create-row hidden']
     for row in rows:
         form_id = f"bank-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"bank-row-{row['id']}"))
@@ -1512,10 +1658,22 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
         raw_headers=set(range(8)),
         row_attrs=row_attrs,
     )
-    smart_panel = f'<div class="panel-body">{smart_form}</div>'
-    form_panel = f'<div class="panel-body">{form}</div>'
-    ledger_panel = f'<div class="panel-body ledger-filter-body">{bank_ledger_filter_form(filters, bank_source_spend_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
-    content = section_stack(kpis, panel("Smart Transaction Import", smart_panel), panel("New Bank Transaction", form_panel), panel("Bank Ledger", ledger_panel))
+    ledger_panel = f"""
+    <section class="panel ledger-panel">
+      <div class="panel-header ledger-panel-header">
+        <h2>Bank Ledger</h2>
+        <button class="button compact icon-button add-entry-button" type="button" data-inline-create-toggle aria-expanded="false" aria-controls="bank-create-row" aria-label="Add bank transaction" title="Add bank transaction">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="panel-body ledger-filter-body">{bank_ledger_filter_form(filters, bank_source_spend_summary(period_rows))}</div>
+      <div class="table-wrap">{table}</div>
+    </section>
+    """
+    content = section_stack(kpis, ledger_panel)
     return layout(conn, "Bank", "Ledger", "/bank", content, flash, bank_filter_form(conn, filters))
 
 
@@ -1705,24 +1863,41 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
       {metric_card("Period", esc(scope), "Filter")}
     </div>
     """
-    form = f"""
-    <form method="post" action="/expenses/create" enctype="multipart/form-data" class="form-grid">
-      {input_field("date", "Date", "date", required=True)}
-      {input_field("category", "Category", "text")}
-      {input_field("vendor", "Vendor", "text")}
-      {input_field("amount", "Amount", "number", step="0.01", required=True)}
-      {input_field("description", "Description", "text", css="span-2")}
-      {datalist_field("paid_by", "Paid By", db.distinct_values(conn, "expenses", "paid_by"))}
-      {select_field("frequency", "Frequency", ["One-time", "Monthly", "Yearly", "Recurring"])}
-      <label class="span-4">Attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      {textarea_field("notes", "Notes", "span-4")}
-      <div class="span-4 actions"><button class="button" type="submit">Save expense</button></div>
-    </form>
+    create_form_id = "expense-create-form"
+    create_actions = f"""
+    <div class="row-actions">
+      <form id="{create_form_id}" class="inline-row-form" method="post" action="/expenses/create" enctype="multipart/form-data" data-inline-create-form>
+        <input type="hidden" name="attachment_path" value="">
+      </form>
+      <button class="button compact icon-button inline-save-button" type="submit" form="{create_form_id}" aria-label="Save expense" title="Save">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5"></path>
+        </svg>
+      </button>
+      <button class="button secondary compact icon-button inline-cancel-button" type="button" data-inline-create-cancel aria-label="Cancel expense" title="Cancel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
     """
-    table_rows = []
-    row_attrs = []
+    table_rows = [
+        [
+            create_input(create_form_id, "date", "date", required=True),
+            create_input(create_form_id, "category", "text", placeholder="Category"),
+            create_input(create_form_id, "vendor", "text", placeholder="Vendor"),
+            create_input(create_form_id, "description", "text", placeholder="Description"),
+            create_input(create_form_id, "amount", "number", step="0.01", placeholder="0.00", required=True),
+            create_input(create_form_id, "paid_by", "text", placeholder="Paid by", list_id="paid-by-options")
+            + datalist_options("paid-by-options", db.distinct_values(conn, "expenses", "paid_by")),
+            create_select(create_form_id, "frequency", ["One-time", "Monthly", "Yearly", "Recurring"], "One-time"),
+            create_input(create_form_id, "notes", "text", placeholder="Notes"),
+            inline_file_cell(create_form_id, "expense", "/expenses/extract-inline"),
+            create_actions,
+        ]
+    ]
+    row_attrs = ['id="expense-create-row" class="inline-create-row" data-inline-create-row hidden']
     for row in rows:
         form_id = f"expense-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"expense-row-{row['id']}"))
@@ -1767,9 +1942,22 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
         raw_headers=set(range(9)),
         row_attrs=row_attrs,
     )
-    form_panel = f'<div class="panel-body">{form}</div>'
-    expense_log_body = f'<div class="panel-body ledger-filter-body">{expense_ledger_filter_form(filters, expense_paid_by_summary(period_rows))}</div><div class="table-wrap">{table}</div>'
-    content = section_stack(kpis, panel("New Business Expense", form_panel), panel("Expense Log", expense_log_body))
+    expense_log_body = f"""
+    <section class="panel ledger-panel">
+      <div class="panel-header ledger-panel-header">
+        <h2>Expense Log</h2>
+        <button class="button compact icon-button add-entry-button" type="button" data-inline-create-toggle aria-expanded="false" aria-controls="expense-create-row" aria-label="Add expense" title="Add expense">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="panel-body ledger-filter-body">{expense_ledger_filter_form(filters, expense_paid_by_summary(period_rows))}</div>
+      <div class="table-wrap">{table}</div>
+    </section>
+    """
+    content = section_stack(kpis, expense_log_body)
     return layout(conn, "Expenses", "Spend", "/expenses", content, flash, expense_filter_form(conn, filters))
 
 
@@ -1817,39 +2005,59 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
       {metric_card("Entries", str(len(rows)), "Visible rows")}
     </div>
     """
-    paystub_form = """
-    <form method="post" action="/payroll/extract" enctype="multipart/form-data" class="form-grid">
-      <label class="span-4">Paystub files
-        <input type="file" name="attachment" multiple required>
-      </label>
-      <div class="span-4 actions"><button class="button secondary" type="submit">Read paystub file(s) and review</button></div>
-    </form>
+    form_id = "payroll-create-form"
+    create_actions = f"""
+    <div class="row-actions">
+      <form id="{form_id}" class="inline-row-form" method="post" action="/payroll/create" enctype="multipart/form-data" data-payroll-form data-inline-create-form>
+        <input type="hidden" name="pct" value="30">
+        <input type="hidden" name="job_start" value="">
+        <input type="hidden" name="job_end" value="">
+        <input type="hidden" name="vendor_pay" value="">
+        <input type="hidden" name="attachment_path" value="">
+      </form>
+      <button class="button compact icon-button inline-save-button" type="submit" form="{form_id}" aria-label="Save payroll entry" title="Save">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5"></path>
+        </svg>
+      </button>
+      <button class="button secondary compact icon-button inline-cancel-button" type="button" data-inline-create-cancel aria-label="Cancel payroll entry" title="Cancel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
     """
-    form = f"""
-    <form method="post" action="/payroll/create" enctype="multipart/form-data" class="form-grid" data-payroll-form>
-      {input_field("month", "Month", "month", required=True)}
-      {datalist_field("first_name", "First Name", db.distinct_values(conn, "payroll_entries", "first_name"))}
-      {datalist_field("last_name", "Last Name", db.distinct_values(conn, "payroll_entries", "last_name"))}
-      {datalist_field("client", "Client", db.distinct_values(conn, "payroll_entries", "client"))}
-      {input_field("vendor", "Vendor", "text", css="span-2")}
-      {input_field("job_start", "Job Start", "date")}
-      {input_field("job_end", "Job End", "date")}
-      {input_field("vendor_pay", "Pay Rate / Hour", "number", step="0.01")}
-      {input_field("pct", "Commission %", "number", value="30", step="0.01")}
-      {input_field("hours", "Hours", "number", step="0.01")}
-      {input_field("gross", "Gross", "number", step="0.01")}
-      {input_field("commission", "Commission", "number", step="0.01")}
-      {input_field("employee_pay", "Payroll After Commission", "number", step="0.01")}
-      {input_field("credit_date", "Credit Date", "date")}
-      {select_field("paystub_sent", "Paystub Sent", ["No", "Yes"], selected="No")}
-      <label class="span-4">Attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      <div class="span-4 actions"><button class="button" type="submit">Save payroll</button></div>
-    </form>
-    """
-    table_rows = []
-    row_attrs = []
+    table_rows = [
+        [
+            create_input(form_id, "month", "month", required=True),
+            f"""
+            <div class="inline-name-fields">
+              {create_input(form_id, "first_name", "text", placeholder="First", list_id="first_name-options")}
+              {create_input(form_id, "last_name", "text", placeholder="Last", list_id="last_name-options")}
+            </div>
+            {datalist_options("first_name-options", db.distinct_values(conn, "payroll_entries", "first_name"))}
+            {datalist_options("last_name-options", db.distinct_values(conn, "payroll_entries", "last_name"))}
+            """,
+            create_input(form_id, "vendor", "text", placeholder="Vendor"),
+            create_input(form_id, "client", "text", placeholder="Client", list_id="client-options")
+            + datalist_options("client-options", db.distinct_values(conn, "payroll_entries", "client")),
+            create_input(form_id, "hours", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "gross", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "commission", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "employee_pay", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "credit_date", "date"),
+            create_select(form_id, "paystub_sent", ["No", "Yes"], "No"),
+            inline_file_cell(
+                form_id,
+                "payroll",
+                "/payroll/extract-inline",
+                'data-payroll-inline-file',
+            ).replace("data-inline-file-status", "data-inline-file-status data-payroll-inline-status"),
+            create_actions,
+        ]
+    ]
+    row_attrs = ['id="payroll-create-row" class="inline-create-row" data-inline-create-row hidden']
     for row in rows:
         form_id = f"payroll-row-form-{row['id']}"
         employee_label = payroll_employee_name(row) or row["month"]
@@ -1912,9 +2120,21 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
         raw_headers=set(range(11)),
         row_attrs=row_attrs,
     )
-    paystub_panel = f'<div class="panel-body">{paystub_form}</div>'
-    form_panel = f'<div class="panel-body">{form}</div>'
-    content = section_stack(kpis, panel("Read Paystub Files", paystub_panel), panel("New Payroll Entry", form_panel), panel("Payroll Ledger", table))
+    ledger_panel = f"""
+    <section class="panel ledger-panel">
+      <div class="panel-header ledger-panel-header">
+        <h2>Payroll Ledger</h2>
+        <button class="button compact icon-button add-entry-button" type="button" data-inline-create-toggle aria-expanded="false" aria-controls="payroll-create-row" aria-label="Add payroll entry" title="Add payroll entry">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="table-wrap">{table}</div>
+    </section>
+    """
+    content = section_stack(kpis, ledger_panel)
     return layout(conn, "Payroll", "Payroll", "/payroll", content, flash, payroll_filter_form(conn, filters))
 
 
@@ -2266,6 +2486,50 @@ def editable_select(form_id: str, name: str, display, options: list[str], select
     )
 
 
+def create_input(
+    form_id: str,
+    name: str,
+    input_type: str = "text",
+    step: str | None = None,
+    placeholder: str | None = None,
+    value: str | int | float | None = None,
+    required: bool = False,
+    list_id: str | None = None,
+) -> str:
+    step_attr = f' step="{esc(step)}"' if step else ""
+    placeholder_attr = f' placeholder="{esc(placeholder)}"' if placeholder else ""
+    value_attr = f' value="{esc(value)}"' if value not in (None, "") else ""
+    required_attr = " required" if required else ""
+    list_attr = f' list="{esc(list_id)}"' if list_id else ""
+    return (
+        f'<input class="table-create-input" type="{esc(input_type)}" name="{esc(name)}" '
+        f'form="{esc(form_id)}"{step_attr}{placeholder_attr}{value_attr}{required_attr}{list_attr}>'
+    )
+
+
+def datalist_options(list_id: str, options: list[str]) -> str:
+    option_html = "".join(f'<option value="{esc(option)}"></option>' for option in options)
+    return f'<datalist id="{esc(list_id)}">{option_html}</datalist>'
+
+
+def create_select(form_id: str, name: str, options: list[str], selected: str | None = None) -> str:
+    option_html = "".join(
+        f'<option value="{esc(option)}"{" selected" if selected == option else ""}>{esc(option)}</option>'
+        for option in options
+    )
+    return f'<select class="table-create-input" name="{esc(name)}" form="{esc(form_id)}">{option_html}</select>'
+
+
+def inline_file_cell(form_id: str, kind: str, url: str, extra_attr: str = "") -> str:
+    extra = f" {extra_attr}" if extra_attr else ""
+    return f"""
+    <div class="inline-file-cell">
+      <input class="table-create-input file-input" type="file" name="attachment" form="{esc(form_id)}" data-inline-extract-file data-extract-kind="{esc(kind)}" data-extract-url="{esc(url)}"{extra}>
+      <span class="inline-file-status" data-inline-file-status></span>
+    </div>
+    """
+
+
 def editable_name(form_id: str, row) -> str:
     first_name = row["first_name"] or ""
     last_name = row["last_name"] or ""
@@ -2332,34 +2596,41 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
       {metric_card("Overdue", money(invoice_overdue), f"{len(overdue_rows)} past due", "warn")}
     </div>
     """
-    extract_form = """
-    <form method="post" action="/invoices/extract" enctype="multipart/form-data" class="form-grid" data-auto-upload-form>
-      <label class="span-4">Invoice files
-        <input type="file" name="attachment" multiple data-auto-submit-file>
-      </label>
-      <label class="span-4">File path
-        <input type="text" name="pdf_path" placeholder="/Users/vamsikrishnabhashyam/Downloads/invoice.pdf">
-      </label>
-      <div class="span-4 actions"><button class="button secondary" type="submit">Read invoice file(s) and review</button></div>
-    </form>
+    create_form_id = "invoice-create-form"
+    create_actions = f"""
+    <div class="row-actions">
+      <form id="{create_form_id}" class="inline-row-form" method="post" action="/invoices/create" enctype="multipart/form-data" data-inline-create-form data-invoice-form>
+        <input type="hidden" name="source_pdf" value="">
+      </form>
+      <button class="button compact icon-button inline-save-button" type="submit" form="{create_form_id}" aria-label="Save invoice" title="Save">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5"></path>
+        </svg>
+      </button>
+      <button class="button secondary compact icon-button inline-cancel-button" type="button" data-inline-create-cancel aria-label="Cancel invoice" title="Cancel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
     """
-    form = f"""
-    <form method="post" action="/invoices/create" enctype="multipart/form-data" class="form-grid">
-      {input_field("date", "Date", "date", required=True)}
-      {input_field("invoice_number", "Invoice #", "text", value=next_number, required=True)}
-      {datalist_field("customer", "Customer / Client", customer_options, required=True)}
-      {input_field("amount", "Amount", "number", step="0.01", required=True)}
-      {input_field("due_date", "Due Date", "date")}
-      {invoice_status_select()}
-      {input_field("balance_due", "Balance Due", "number", step="0.01")}
-      <label class="span-4">Attachments
-        <input type="file" name="attachment" multiple>
-      </label>
-      <div class="span-4 actions"><button class="button" type="submit">Save invoice</button></div>
-    </form>
-    """
-    table_rows = []
-    row_attrs = []
+    table_rows = [
+        [
+            create_input(create_form_id, "date", "date", required=True),
+            create_input(create_form_id, "invoice_number", "text", value=next_number, required=True),
+            create_input(create_form_id, "customer", "text", placeholder="Customer", required=True, list_id="customer-options")
+            + datalist_options("customer-options", customer_options),
+            create_select(create_form_id, "status", INVOICE_STATUS_OPTIONS, "Not Received"),
+            '<span class="status-badge due" data-invoice-inline-due-status>Draft</span>',
+            create_input(create_form_id, "due_date", "date"),
+            create_input(create_form_id, "amount", "number", step="0.01", placeholder="0.00", required=True),
+            create_input(create_form_id, "balance_due", "number", step="0.01", placeholder="0.00"),
+            inline_file_cell(create_form_id, "invoice", "/invoices/extract-inline"),
+            create_actions,
+        ]
+    ]
+    row_attrs = ['id="invoice-create-row" class="inline-create-row" data-inline-create-row hidden']
     for row in rows:
         form_id = f"invoice-row-form-{row['id']}"
         row_attrs.append(ledger_row_attr(f"invoice-row-{row['id']}"))
@@ -2404,9 +2675,21 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
         raw_headers=set(range(9)),
         row_attrs=row_attrs,
     )
-    extract_panel = f'<div class="panel-body">{extract_form}</div>'
-    form_panel = f'<div class="panel-body">{form}</div>'
-    content = section_stack(kpis, panel("Read Invoice Files", extract_panel), panel("New Invoice", form_panel), panel("Invoice Ledger", table))
+    ledger_panel = f"""
+    <section class="panel ledger-panel">
+      <div class="panel-header ledger-panel-header">
+        <h2>Invoice Ledger</h2>
+        <button class="button compact icon-button add-entry-button" type="button" data-inline-create-toggle aria-expanded="false" aria-controls="invoice-create-row" aria-label="Add invoice" title="Add invoice">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="table-wrap">{table}</div>
+    </section>
+    """
+    content = section_stack(kpis, ledger_panel)
     return layout(conn, "Invoices", "Receivables", "/invoices", content, flash, invoice_filter_form(conn, filters))
 
 
