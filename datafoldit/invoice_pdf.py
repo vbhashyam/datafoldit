@@ -339,6 +339,11 @@ def extract_customer(text: str) -> str | None:
     for label in ("Bill To", "Bill To Address", "Sold To", "Sold To Address", "Customer"):
         for index, line in enumerate(lines):
             if label.lower() in line.lower():
+                remainder = re.sub(rf"^{re.escape(label)}\s*:?", "", line, flags=re.I).strip()
+                if remainder:
+                    candidate = clean_customer_candidate(remainder)
+                    if looks_like_customer_name(candidate):
+                        return candidate
                 for following in lines[index + 1 : index + 5]:
                     if not following or "address" in following.lower() or "charge" in following.lower():
                         continue
@@ -361,7 +366,7 @@ def extract_customer(text: str) -> str | None:
 
 def clean_customer_candidate(line: str) -> str:
     candidate = re.split(
-        r"\b(?:Invoice Date|Due Date|Terms|Invoice #|Balance Due)\b\s*:?",
+        r"\b(?:Customer|Invoice Date|Due Date|Terms|Invoice #|Balance Due)\b\s*:?",
         line,
         maxsplit=1,
         flags=re.I,

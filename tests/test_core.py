@@ -47,11 +47,11 @@ class DataFoldCoreTests(unittest.TestCase):
         if not DEFAULT_SOURCE_XLSX.exists():
             self.skipTest(f"Missing source workbook: {DEFAULT_SOURCE_XLSX}")
         counts = import_company_workbook(self.conn, DEFAULT_SOURCE_XLSX, replace=True)
-        self.assertEqual(counts["expenses"], 21)
-        self.assertEqual(counts["bank_transactions"], 19)
-        self.assertEqual(counts["payroll_entries"], 4)
-        self.assertEqual(counts["invoices"], 11)
-        self.assertAlmostEqual(db.current_balance(self.conn), 19254.58, places=2)
+        self.assertEqual(counts["expenses"], 25)
+        self.assertEqual(counts["bank_transactions"], 22)
+        self.assertEqual(counts["payroll_entries"], 6)
+        self.assertEqual(counts["invoices"], 13)
+        self.assertAlmostEqual(db.current_balance(self.conn), 10334.58, places=2)
         monthly = db.monthly_bank_summary(self.conn)
         self.assertEqual(monthly[0]["month"], "2025-12")
         self.assertAlmostEqual(monthly[0]["opening"], 6400.00, places=2)
@@ -69,7 +69,7 @@ class DataFoldCoreTests(unittest.TestCase):
             ["Summary", "Bank Transactions", "Expenses", "Payroll", "Invoices"],
         )
         self.assertEqual(workbook["Summary"]["A1"].value, "DataFold IT Operations Report")
-        self.assertAlmostEqual(float(workbook["Summary"]["B5"].value), 19254.58, places=2)
+        self.assertAlmostEqual(float(workbook["Summary"]["B5"].value), 10334.58, places=2)
 
     def test_period_filter_supports_year_and_blank_month(self):
         if not DEFAULT_SOURCE_XLSX.exists():
@@ -80,8 +80,8 @@ class DataFoldCoreTests(unittest.TestCase):
         year_rows = filter_rows_by_period(rows, "date", {"year": "2026", "month": ""})
         all_rows = filter_rows_by_period(rows, "date", {"year": "", "month": ""})
         self.assertEqual(len(may_rows), 6)
-        self.assertEqual(len(year_rows), 18)
-        self.assertEqual(len(all_rows), 19)
+        self.assertEqual(len(year_rows), 21)
+        self.assertEqual(len(all_rows), 22)
 
     def test_smart_transaction_text_parser(self):
         text = """
@@ -365,6 +365,17 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(parsed["due_date"], "2025-01-13")
         self.assertEqual(parsed["customer"], "A2systemsLLC")
         self.assertAlmostEqual(parsed["amount"], 17.21, places=2)
+        inline_customer = parse_invoice_text(
+            """
+            Invoice Number: INV-TEST-777
+            Invoice Date: June 25, 2026
+            Customer: Example Client LLC
+            Due Date: July 25, 2026
+            Total Amount: $987.65
+            Balance Due: $987.65
+            """
+        )
+        self.assertEqual(inline_customer["customer"], "Example Client LLC")
 
     def test_invoice_parser_handles_day_month_dates_and_paid_balance(self):
         text = """
@@ -496,8 +507,13 @@ class DataFoldCoreTests(unittest.TestCase):
             },
         )
         html = render_invoices(self.conn)
-        self.assertIn('type="file" name="attachment" multiple', html)
-        self.assertIn("Read Invoice Files", html)
+        self.assertIn('name="attachment" form="invoice-create-form"', html)
+        self.assertIn('data-extract-kind="invoice"', html)
+        self.assertIn('data-extract-url="/invoices/extract-inline"', html)
+        self.assertIn('id="invoice-create-row"', html)
+        self.assertIn('data-inline-create-toggle', html)
+        self.assertNotIn("Read Invoice Files", html)
+        self.assertNotIn("New Invoice", html)
         self.assertNotIn("accept=", html)
         self.assertIn('class="grid cols-4"', html)
         self.assertIn("Total Invoice", html)
@@ -578,7 +594,13 @@ class DataFoldCoreTests(unittest.TestCase):
         bank_html = render_bank(self.conn)
         expenses_html = render_expenses(self.conn)
         payroll_html = render_payroll(self.conn)
-        self.assertIn('name="attachment" multiple required', bank_html)
+        self.assertIn('name="attachment" form="bank-create-form"', bank_html)
+        self.assertIn('data-extract-kind="bank"', bank_html)
+        self.assertIn('data-extract-url="/bank/extract-inline"', bank_html)
+        self.assertIn('id="bank-create-row"', bank_html)
+        self.assertIn('data-bank-form', bank_html)
+        self.assertNotIn("Smart Transaction Import", bank_html)
+        self.assertNotIn("New Bank Transaction", bank_html)
         self.assertIn('name="source"', bank_html)
         self.assertIn("Filter source", bank_html)
         self.assertIn("Vamsi - $42.00", bank_html)
@@ -595,7 +617,11 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertNotIn('/bank/edit?id=', bank_html)
         self.assertIn('href="/bank?sort=amount&direction=asc"', bank_html)
         self.assertIn('href="/bank?sort=signed&direction=asc"', bank_html)
-        self.assertIn('name="attachment" multiple', expenses_html)
+        self.assertIn('name="attachment" form="expense-create-form"', expenses_html)
+        self.assertIn('data-extract-kind="expense"', expenses_html)
+        self.assertIn('data-extract-url="/expenses/extract-inline"', expenses_html)
+        self.assertIn('id="expense-create-row"', expenses_html)
+        self.assertNotIn("New Business Expense", expenses_html)
         self.assertIn('name="paid_by"', expenses_html)
         self.assertIn("Filter paid by", expenses_html)
         self.assertIn("Aditya - $42.00", expenses_html)
@@ -607,9 +633,18 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertNotIn('/expenses/edit?id=', expenses_html)
         self.assertIn('href="/expenses?sort=vendor&direction=asc"', expenses_html)
         self.assertIn('href="/expenses?sort=amount&direction=asc"', expenses_html)
-        self.assertIn('name="attachment" multiple', payroll_html)
-        self.assertIn("Read Paystub Files", payroll_html)
+        self.assertIn('name="attachment" form="payroll-create-form"', payroll_html)
+        self.assertIn('data-payroll-inline-file', payroll_html)
+        self.assertIn('data-payroll-inline-status', payroll_html)
+        self.assertIn('name="attachment_path"', payroll_html)
+        self.assertNotIn("Read Paystub Files", payroll_html)
         self.assertIn("Paystub Sent", payroll_html)
+        self.assertNotIn("New Payroll Entry", payroll_html)
+        self.assertIn('data-inline-create-toggle', payroll_html)
+        self.assertIn('id="payroll-create-row"', payroll_html)
+        self.assertIn('class="inline-create-row"', payroll_html)
+        self.assertIn('id="payroll-create-form"', payroll_html)
+        self.assertIn('data-inline-create-cancel', payroll_html)
         self.assertIn('href="/payroll?sort=name&direction=asc"', payroll_html)
         self.assertIn('href="/payroll?sort=gross&direction=asc"', payroll_html)
         self.assertIn('id="payroll-row-form-', payroll_html)

@@ -90,7 +90,7 @@ def import_bank_transactions(conn, workbook) -> int:
             {
                 "date": item.get("Date"),
                 "month": month_to_key(item.get("Date"), item.get("Month")),
-                "type": item.get("Type"),
+                "type": normalize_bank_type(item.get("Type")),
                 "category": item.get("Category"),
                 "detail": item.get("Vendor / Detail"),
                 "source": item.get("Paid By / Source"),
@@ -155,6 +155,23 @@ def month_to_key(date_value: Any, month_value: Any) -> str | None:
     if normalized:
         return normalized
     return db.clean_text(month_value)
+
+
+def normalize_bank_type(value: Any) -> str | None:
+    text = db.clean_text(value)
+    if text is None:
+        return None
+    canonical = {
+        "opening": "Opening",
+        "deposit": "Deposit",
+        "transfer in": "Transfer In",
+        "adjustment in": "Adjustment In",
+        "expense": "Expense",
+        "withdrawal": "Withdrawal",
+        "transfer out": "Transfer Out",
+        "adjustment out": "Adjustment Out",
+    }
+    return canonical.get(text.lower(), text)
 
 
 def export_report_workbook(
