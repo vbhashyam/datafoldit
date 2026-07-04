@@ -139,6 +139,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "invoices", "commission_pct", "REAL DEFAULT 30")
     ensure_column(conn, "invoices", "commission_amount", "REAL DEFAULT 0")
     backfill_invoice_commissions(conn)
+    normalize_legacy_payroll_vendor_pay(conn)
     ensure_primary_account(conn)
     conn.commit()
 
@@ -165,6 +166,32 @@ def backfill_invoice_commissions(conn: sqlite3.Connection) -> None:
             ELSE commission_pct / 100.0
         END, 2)
         WHERE commission_amount IS NULL OR commission_amount = 0
+        """
+    )
+
+
+def normalize_legacy_payroll_vendor_pay(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE payroll_entries
+        SET vendor_pay = ROUND(employee_pay / hours, 2),
+            gross = ROUND(employee_pay, 2),
+            commission = 0,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE COALESCE(tax, 0) = 0
+          AND COALESCE(commission, 0) > 0
+          AND COALESCE(employee_pay, 0) > 0
+          AND COALESCE(gross, 0) > COALESCE(employee_pay, 0)
+          AND COALESCE(hours, 0) > 0
+          AND ABS(COALESCE(gross, 0) - (COALESCE(employee_pay, 0) + COALESCE(commission, 0))) < 0.02
+          AND ABS(
+              COALESCE(commission, 0) -
+              (COALESCE(gross, 0) * CASE
+                  WHEN COALESCE(pct, 0) > 0 AND COALESCE(pct, 0) <= 1 THEN COALESCE(pct, 0)
+                  WHEN COALESCE(pct, 0) > 1 THEN COALESCE(pct, 0) / 100.0
+                  ELSE 0.3
+              END)
+          ) < 0.02
         """
     )
 

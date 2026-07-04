@@ -350,6 +350,41 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertAlmostEqual(row["commission"], 0.00, places=2)
         self.assertAlmostEqual(row["employee_pay"], 525.00, places=2)
 
+    def test_legacy_invoice_rate_payroll_normalizes_to_vendor_pay(self):
+        self.conn.execute(
+            """
+            INSERT INTO payroll_entries
+                (month, first_name, last_name, vendor_pay, pct, hours, gross, tax, commission, employee_pay)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-02", "Rama", "Kolasani", 55.00, 0.3, 112.0, 6160.00, 0.0, 1848.00, 4312.00),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO payroll_entries
+                (month, first_name, last_name, vendor_pay, pct, hours, gross, tax, commission, employee_pay)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-05", "Ajitha", "Bodapothula", 45.50, 30.0, 176.0, 8008.00, 0.0, 1452.50, 6555.50),
+        )
+        db.normalize_legacy_payroll_vendor_pay(self.conn)
+        legacy_row = self.conn.execute(
+            "SELECT vendor_pay, gross, tax, commission, employee_pay FROM payroll_entries WHERE first_name = ?",
+            ("Rama",),
+        ).fetchone()
+        paystub_like_row = self.conn.execute(
+            "SELECT vendor_pay, gross, tax, commission, employee_pay FROM payroll_entries WHERE first_name = ?",
+            ("Ajitha",),
+        ).fetchone()
+        self.assertAlmostEqual(legacy_row["vendor_pay"], 38.50, places=2)
+        self.assertAlmostEqual(legacy_row["gross"], 4312.00, places=2)
+        self.assertAlmostEqual(legacy_row["tax"], 0.00, places=2)
+        self.assertAlmostEqual(legacy_row["commission"], 0.00, places=2)
+        self.assertAlmostEqual(legacy_row["employee_pay"], 4312.00, places=2)
+        self.assertAlmostEqual(paystub_like_row["vendor_pay"], 45.50, places=2)
+        self.assertAlmostEqual(paystub_like_row["gross"], 8008.00, places=2)
+        self.assertAlmostEqual(paystub_like_row["commission"], 1452.50, places=2)
+
     def test_invoice_ocr_text_parser(self):
         text = """
         Invoice
