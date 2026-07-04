@@ -61,6 +61,13 @@ def clean_header(value: Any) -> str:
     return str(value or "").strip()
 
 
+def value_from(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in item and item.get(key) not in (None, ""):
+            return item.get(key)
+    return None
+
+
 def import_expenses(conn, workbook) -> int:
     rows = []
     for item in rows_from_table(workbook, "Expenses", "Log"):
@@ -114,13 +121,15 @@ def import_payroll(conn, workbook) -> int:
                 "client": item.get("Client"),
                 "job_start": item.get("Job Start"),
                 "job_end": item.get("Job End"),
-                "vendor_pay": item.get("Vendor Pay"),
-                "pct": item.get("Pct"),
+                "vendor_pay": value_from(item, "Vendor Pay", "Pay Rate / Hour"),
+                "pct": value_from(item, "Pct", "Commission %"),
                 "hours": item.get("Hours"),
-                "gross": item.get("Gross"),
-                "commission": item.get("Commission"),
-                "employee_pay": item.get("Employee Pay"),
-                "credit_date": item.get("Credit Date"),
+                "gross": value_from(item, "Gross", "Total Earnings"),
+                "tax": value_from(item, "Tax", "Total Deductions"),
+                "tax_breakdown": item.get("Tax Breakdown"),
+                "commission": value_from(item, "Commission", "Commission Amount"),
+                "employee_pay": value_from(item, "Net Pay", "Employee Pay"),
+                "credit_date": value_from(item, "Credit Date", "Payment Date"),
             }
         )
     return db.bulk_insert(conn, "payroll_entries", rows)
@@ -140,6 +149,8 @@ def import_invoices(conn, workbook) -> int:
                 "received": item.get("Received"),
                 "due_date": item.get("Due Date"),
                 "amount": item.get("Amount"),
+                "commission_pct": value_from(item, "Commission %", "Commission Percent", "Pct"),
+                "commission_amount": value_from(item, "Commission Amount"),
                 "status": item.get("Status"),
                 "balance_due": item.get("Balance Due"),
             }
@@ -212,7 +223,8 @@ def build_summary_sheet(ws, report_data, period: str, month: str | None, day: st
         ["Metric", "Amount", "Metric", "Amount"],
         ["Current Bank Balance", metrics["current_balance"], "Business Expenses", metrics["total_expenses"]],
         ["Invoice Total", metrics["invoice_total"], "Invoice Outstanding", metrics["invoice_outstanding"]],
-        ["Payroll Gross", metrics["payroll_gross"], "Payroll Commission", metrics["payroll_commission"]],
+        ["Invoice Paid", metrics["invoice_paid"], "Commission Received", metrics["invoice_commission_received"]],
+        ["Payroll Gross", metrics["payroll_gross"], "Payroll Tax", metrics["payroll_tax"]],
         [],
         ["Record Counts", "", "", ""],
         ["Bank Transactions", len(report_data["bank"]), "Expenses", len(report_data["expenses"])],
@@ -224,7 +236,7 @@ def build_summary_sheet(ws, report_data, period: str, month: str | None, day: st
     ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
     ws["A1"].fill = PatternFill("solid", fgColor="1F4E5F")
     ws["A4"].font = ws["C4"].font = Font(bold=True)
-    ws["A9"].font = Font(bold=True)
+    ws["A10"].font = Font(bold=True)
 
 
 def build_bank_sheet(ws, rows) -> None:
@@ -274,12 +286,13 @@ def build_payroll_sheet(ws, rows) -> None:
             "Job Start",
             "Job End",
             "Vendor Pay",
-            "Pct",
             "Hours",
             "Gross",
-            "Commission",
-            "Employee Pay",
+            "Tax",
+            "Tax Breakdown",
+            "Net Pay",
             "Credit Date",
+            "Paystub Sent",
             "Attachment",
         ]
     )
@@ -294,19 +307,35 @@ def build_payroll_sheet(ws, rows) -> None:
                 row["job_start"],
                 row["job_end"],
                 row["vendor_pay"],
-                row["pct"],
                 row["hours"],
                 row["gross"],
-                row["commission"],
+                row["tax"] if "tax" in row.keys() else 0,
+                row["tax_breakdown"] if "tax_breakdown" in row.keys() else None,
                 row["employee_pay"],
                 row["credit_date"],
+                row["paystub_sent"] if "paystub_sent" in row.keys() else None,
                 row["attachment_path"] if "attachment_path" in row.keys() else None,
             ]
         )
 
 
 def build_invoices_sheet(ws, rows) -> None:
-    ws.append(["Date", "Invoice #", "Customer", "Void?", "Received", "Due Date", "Amount", "Status", "Balance Due", "Source PDF"])
+    ws.append(
+        [
+            "Date",
+            "Invoice #",
+            "Customer",
+            "Void?",
+            "Received",
+            "Due Date",
+            "Amount",
+            "Commission %",
+            "Commission Amount",
+            "Status",
+            "Balance Due",
+            "Source PDF",
+        ]
+    )
     for row in rows:
         ws.append(
             [
@@ -317,6 +346,8 @@ def build_invoices_sheet(ws, rows) -> None:
                 row["received"],
                 row["due_date"],
                 row["amount"],
+                db.commission_fraction(row["commission_pct"] if "commission_pct" in row.keys() else 30),
+                row["commission_amount"] if "commission_amount" in row.keys() else 0,
                 row["status"],
                 row["balance_due"],
                 row["source_pdf"] if "source_pdf" in row.keys() else None,
@@ -327,7 +358,18 @@ def build_invoices_sheet(ws, rows) -> None:
 def style_sheet(ws) -> None:
     header_fill = PatternFill("solid", fgColor="234E52")
     header_font = Font(bold=True, color="FFFFFF")
-    currency_columns = {"Amount", "Signed Amount", "Vendor Pay", "Gross", "Commission", "Employee Pay", "Balance Due"}
+    currency_columns = {
+        "Amount",
+        "Signed Amount",
+        "Vendor Pay",
+        "Gross",
+        "Tax",
+        "Net Pay",
+        "Commission",
+        "Commission Amount",
+        "Employee Pay",
+        "Balance Due",
+    }
     for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
@@ -346,6 +388,6 @@ def style_sheet(ws) -> None:
         if header in currency_columns:
             for row in range(2, ws.max_row + 1):
                 ws.cell(row=row, column=index).number_format = '$#,##0.00'
-        if header == "Pct":
+        if header in {"Pct", "Commission %"}:
             for row in range(2, ws.max_row + 1):
                 ws.cell(row=row, column=index).number_format = "0.0%"

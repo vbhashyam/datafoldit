@@ -675,18 +675,18 @@ th.money {
 .row-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .icon-button {
-  width: 32px;
-  min-height: 32px;
+  width: 28px;
+  min-height: 28px;
   padding: 0;
 }
 
 .icon-button svg {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
 }
 
 .edit-icon-button {
@@ -920,23 +920,108 @@ textarea {
 }
 
 .button.compact {
-  min-height: 40px;
-  padding: 9px 14px;
+  min-height: 36px;
+  padding: 8px 12px;
 }
 
 .button.icon-button {
-  width: 40px;
+  width: 30px;
+  min-height: 30px;
   padding: 0;
 }
 
 .button.icon-button svg {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.tax-display {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  width: 100%;
+}
+
+.tax-info {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #9aa1aa;
+  color: #ffffff;
+  cursor: help;
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+}
+
+.tax-info-icon {
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.tax-tooltip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  min-width: 240px;
+  max-width: 300px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f7fbff;
+  color: #182536;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+}
+
+.tax-info:hover .tax-tooltip,
+.tax-info:focus .tax-tooltip,
+.tax-info:focus-within .tax-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.tax-tooltip-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tax-tooltip-line span {
+  color: #49576a;
+  font-weight: 700;
+}
+
+.tax-tooltip-line strong {
+  color: #0f1824;
+  font-weight: 900;
+}
+
+.tax-tooltip-line.total {
+  margin-top: 5px;
+  padding-top: 8px;
+  border-top: 1px solid #d7e0eb;
 }
 
 .button.secondary,
