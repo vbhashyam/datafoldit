@@ -62,6 +62,71 @@ def extract_paystub_rows_from_file(path: str | Path) -> list[dict[str, Any]]:
     return [extract_paystub_from_file(source)]
 
 
+def backfill_payroll_tax_breakdowns_from_attachments(conn) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, month, first_name, last_name, gross, tax, employee_pay, attachment_path
+        FROM payroll_entries
+        WHERE COALESCE(tax_breakdown, '') = ''
+          AND COALESCE(attachment_path, '') != ''
+        """
+    ).fetchall()
+    cache: dict[str, list[dict[str, Any]]] = {}
+    updated = 0
+    for row in rows:
+        source = Path(row["attachment_path"])
+        if source.suffix.lower() not in {".xls", ".xlsx", ".xlsm"} or not source.exists():
+            continue
+        try:
+            parsed_rows = cache.setdefault(str(source), extract_payrun_rows(source))
+        except Exception:
+            continue
+        match = matching_payrun_row(row, parsed_rows)
+        if not match or not match.get("tax_breakdown"):
+            continue
+        conn.execute(
+            """
+            UPDATE payroll_entries
+            SET tax_breakdown = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (match["tax_breakdown"], row["id"]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
+def matching_payrun_row(row, parsed_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    first_name = normalized_name(row["first_name"])
+    last_name = normalized_name(row["last_name"])
+    month = str(row["month"] or "")
+    for parsed in parsed_rows:
+        if month and parsed.get("month") != month:
+            continue
+        if first_name and normalized_name(parsed.get("first_name")) != first_name:
+            continue
+        if last_name and normalized_name(parsed.get("last_name")) != last_name:
+            continue
+        if not close_amount(row["gross"], parsed.get("gross")):
+            continue
+        if db.amount_value(row["tax"]) and not close_amount(row["tax"], parsed.get("tax")):
+            continue
+        if db.amount_value(row["employee_pay"]) and not close_amount(row["employee_pay"], parsed.get("employee_pay")):
+            continue
+        return parsed
+    return None
+
+
+def normalized_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def close_amount(left: Any, right: Any) -> bool:
+    return abs(db.amount_value(left) - db.amount_value(right)) < 0.01
+
+
 def extract_paystub_text(path: Path) -> str:
     text = pdftotext(path) if path.suffix.lower() == ".pdf" else ""
     if not useful_text(text):

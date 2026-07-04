@@ -22,7 +22,11 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from . import db
 from .excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from .invoice_pdf import extract_invoice_from_pdf
-from .paystub_import import extract_paystub_from_file, extract_paystub_rows_from_file
+from .paystub_import import (
+    backfill_payroll_tax_breakdowns_from_attachments,
+    extract_paystub_from_file,
+    extract_paystub_rows_from_file,
+)
 from .transaction_import import extract_transaction_from_file
 
 
@@ -86,6 +90,7 @@ def main() -> None:
     db_path = Path(args.db)
     conn = db.connect(db_path)
     db.init_db(conn)
+    backfill_payroll_tax_breakdowns_from_attachments(conn)
     source = Path(args.import_xlsx) if args.import_xlsx else DEFAULT_SOURCE_XLSX
     auto_import = os.environ.get("DATAFOLDIT_AUTO_IMPORT", "1").strip().lower()
     auto_import_enabled = auto_import not in {"0", "false", "no", "off"}

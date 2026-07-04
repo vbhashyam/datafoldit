@@ -7,7 +7,11 @@ from openpyxl import load_workbook
 from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
-from datafoldit.paystub_import import extract_paystub_rows_from_file, parse_paystub_text
+from datafoldit.paystub_import import (
+    backfill_payroll_tax_breakdowns_from_attachments,
+    extract_paystub_rows_from_file,
+    parse_paystub_text,
+)
 from datafoldit.transaction_import import parse_transaction_text
 from datafoldit.web import (
     add_bank_transaction_batch,
@@ -780,6 +784,26 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Tax", html)
         self.assertIn("Net Pay", html)
         self.assertIn("816.49", html)
+        payroll_id = db.add_payroll_entry(
+            self.conn,
+            {
+                "month": rama["month"],
+                "first_name": rama["first_name"],
+                "last_name": rama["last_name"],
+                "gross": str(rama["gross"]),
+                "tax": str(rama["tax"]),
+                "employee_pay": str(rama["employee_pay"]),
+                "attachment_path": str(payrun_path),
+            },
+        )
+        updated = backfill_payroll_tax_breakdowns_from_attachments(self.conn)
+        self.assertEqual(updated, 1)
+        saved = self.conn.execute(
+            "SELECT tax_breakdown FROM payroll_entries WHERE id = ?",
+            (payroll_id,),
+        ).fetchone()
+        self.assertIn("Federal Income Tax", saved["tax_breakdown"])
+        self.assertIn("Arizona State Tax", saved["tax_breakdown"])
 
     def test_bulk_bank_review_and_save_selected_rows(self):
         html = render_transaction_bulk_review(
