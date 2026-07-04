@@ -60,6 +60,7 @@ PAYROLL_SORT_KEYS = {
     "hours",
     "gross",
     "tax",
+    "employee_pay",
     "credit_date",
     "paystub_sent",
     "attachment",
@@ -684,7 +685,7 @@ def sort_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[
     def value(row: sqlite3.Row):
         if sort_key == "name":
             return payroll_employee_name(row).lower()
-        if sort_key in {"vendor_pay", "hours", "gross", "tax"}:
+        if sort_key in {"vendor_pay", "hours", "gross", "tax", "employee_pay"}:
             return db.amount_value(row[sort_key])
         if sort_key == "paystub_sent":
             return "yes" if str(row["paystub_sent"] or "").upper() == "Y" else "no"
@@ -1093,6 +1094,7 @@ def payroll_extract_payload(extracted: dict, saved_path: Path) -> dict:
         "hours",
         "gross",
         "tax",
+        "tax_breakdown",
         "commission",
         "employee_pay",
         "credit_date",
@@ -1161,6 +1163,7 @@ def add_payroll_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) ->
             "hours": form_value(fields, f"hours_{index}"),
             "gross": form_value(fields, f"gross_{index}"),
             "tax": form_value(fields, f"tax_{index}"),
+            "tax_breakdown": form_value(fields, f"tax_breakdown_{index}"),
             "commission": form_value(fields, f"commission_{index}"),
             "employee_pay": form_value(fields, f"employee_pay_{index}"),
             "credit_date": form_value(fields, f"credit_date_{index}"),
@@ -2037,6 +2040,7 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     <div class="row-actions">
       <form id="{form_id}" class="inline-row-form" method="post" action="/payroll/create" enctype="multipart/form-data" data-payroll-form data-inline-create-form>
         <input type="hidden" name="attachment_path" value="">
+        <input type="hidden" name="tax_breakdown" value="">
       </form>
       <button class="button compact icon-button inline-save-button" type="submit" form="{form_id}" aria-label="Save payroll entry" title="Save">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2071,6 +2075,7 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
             create_input(form_id, "hours", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "gross", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "tax", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "employee_pay", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "credit_date", "date"),
             create_select(form_id, "paystub_sent", ["No", "Yes"], "No"),
             inline_file_cell(
@@ -2099,7 +2104,8 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
                 editable_input(form_id, "vendor_pay", money(row["vendor_pay"]), currency_input(row["vendor_pay"]), "number", step="0.01"),
                 editable_input(form_id, "hours", row["hours"], currency_input(row["hours"]), "number", step="0.01"),
                 editable_input(form_id, "gross", money(row["gross"]), currency_input(row["gross"]), "number", step="0.01"),
-                editable_input(form_id, "tax", money(row["tax"]), currency_input(row["tax"]), "number", step="0.01"),
+                editable_tax_input(form_id, row),
+                editable_input(form_id, "employee_pay", money(row["employee_pay"]), currency_input(row["employee_pay"]), "number", step="0.01"),
                 editable_input(form_id, "credit_date", row["credit_date"], row["credit_date"], "date"),
                 editable_select(form_id, "paystub_sent", paystub_sent_label, ["No", "Yes"], paystub_sent_label),
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
@@ -2132,15 +2138,16 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
             sort_header("Hours", "hours", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Gross", "gross", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Tax", "tax", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Net Pay", "employee_pay", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Credit Date", "credit_date", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Paystub Sent", "paystub_sent", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Attachment", "attachment", filters, "/payroll", ["year", "month", "candidate"]),
             "Action",
         ],
         table_rows,
-        raw_columns=set(range(14)),
-        money_columns={6, 8, 9},
-        raw_headers=set(range(13)),
+        raw_columns=set(range(15)),
+        money_columns={6, 8, 9, 10},
+        raw_headers=set(range(14)),
         row_attrs=row_attrs,
     )
     ledger_panel = f"""
@@ -2193,11 +2200,12 @@ def render_paystub_review(conn, extracted: dict, flash: str | None = None) -> st
       {input_field("hours", "Hours", "number", value=currency_input(extracted.get("hours")), step="0.01")}
       {input_field("gross", "Gross", "number", value=currency_input(extracted.get("gross")), step="0.01")}
       {input_field("tax", "Tax", "number", value=currency_input(extracted.get("tax")), step="0.01")}
+      {input_field("employee_pay", "Net Pay", "number", value=currency_input(extracted.get("employee_pay")), step="0.01")}
       {input_field("credit_date", "Credit Date", "date", value=extracted.get("credit_date"))}
       {select_field("paystub_sent", "Paystub Sent", ["No", "Yes"], selected="Yes" if extracted.get("paystub_sent") == "Y" else "No")}
       <input type="hidden" name="pct" value="{esc(extracted.get("pct") or "")}">
       <input type="hidden" name="commission" value="{esc(extracted.get("commission") or "")}">
-      <input type="hidden" name="employee_pay" value="{esc(extracted.get("employee_pay") or "")}">
+      <input type="hidden" name="tax_breakdown" value="{esc(extracted.get("tax_breakdown") or "")}">
       <input type="hidden" name="attachment_path" value="{esc(attachment_path)}">
       <div class="span-4 actions">
         <button class="button" type="submit">Save imported paystub</button>
@@ -2226,7 +2234,7 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
                 <tr class="bulk-error-row">
                   <td></td>
                   <td>{attachment_html}</td>
-                  <td colspan="10"><strong>Could not read this paystub.</strong> {esc(extracted.get("error") or "")}</td>
+                  <td colspan="14"><strong>Could not read this paystub.</strong> {esc(extracted.get("error") or "")}</td>
                 </tr>
                 """
             )
@@ -2247,11 +2255,12 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <td>{bulk_input(f"hours_{form_index}", "Hours", "number", currency_input(extracted.get("hours")), step="0.01")}</td>
               <td>{bulk_input(f"gross_{form_index}", "Gross", "number", currency_input(extracted.get("gross")), step="0.01")}</td>
               <td>{bulk_input(f"tax_{form_index}", "Tax", "number", currency_input(extracted.get("tax")), step="0.01")}</td>
+              <td>{bulk_input(f"employee_pay_{form_index}", "Net pay", "number", currency_input(extracted.get("employee_pay")), step="0.01")}</td>
               <td>{bulk_input(f"credit_date_{form_index}", "Payment date", "date", extracted.get("credit_date"))}</td>
               <td><select name="paystub_sent_{form_index}" aria-label="Paystub sent"><option value="Y" selected>Yes</option><option value="N">No</option></select></td>
               <input type="hidden" name="pct_{form_index}" value="{esc(extracted.get("pct") or "")}">
               <input type="hidden" name="commission_{form_index}" value="{esc(extracted.get("commission") or "")}">
-              <input type="hidden" name="employee_pay_{form_index}" value="{esc(extracted.get("employee_pay") or "")}">
+              <input type="hidden" name="tax_breakdown_{form_index}" value="{esc(extracted.get("tax_breakdown") or "")}">
             </tr>
             """
         )
@@ -2277,6 +2286,7 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <th>Hours</th>
               <th>Gross</th>
               <th>Tax</th>
+              <th>Net Pay</th>
               <th>Payment Date</th>
               <th>Paystub Sent</th>
             </tr>
@@ -2525,6 +2535,71 @@ def editable_input(
         f'value="{esc(editor_value)}" form="{esc(form_id)}" data-original="{esc(editor_value)}"'
         f'{step_attr}{required_attr} disabled>'
     )
+
+
+def editable_tax_input(form_id: str, row: sqlite3.Row) -> str:
+    editor_value = currency_input(row["tax"])
+    return (
+        f'<span class="cell-view">{tax_display(row)}</span>'
+        f'<input class="cell-editor" type="number" name="tax" value="{esc(editor_value)}" '
+        f'form="{esc(form_id)}" data-original="{esc(editor_value)}" step="0.01" disabled>'
+    )
+
+
+def tax_display(row: sqlite3.Row) -> str:
+    return (
+        f'<span class="tax-display"><span>{money(row["tax"])}</span>'
+        f'{tax_breakdown_icon(row["tax"], row["tax_breakdown"] if "tax_breakdown" in row.keys() else None)}</span>'
+    )
+
+
+def tax_breakdown_icon(tax_amount, breakdown: str | None) -> str:
+    items = tax_breakdown_items(breakdown)
+    if not items and db.amount_value(tax_amount):
+        items = [{"label": "Total Deductions", "amount": db.amount_value(tax_amount), "total": True}]
+    if not items:
+        return ""
+    lines = "".join(
+        '<span class="tax-tooltip-line{total_css}"><span>{label}</span><strong>{amount}</strong></span>'.format(
+            total_css=" total" if item.get("total") else "",
+            label=esc(item.get("label") or "Tax"),
+            amount=money(item.get("amount")),
+        )
+        for item in items
+    )
+    return f"""
+    <span class="tax-info" tabindex="0" aria-label="Tax breakdown">
+      <span class="tax-info-icon">i</span>
+      <span class="tax-tooltip" role="tooltip">{lines}</span>
+    </span>
+    """
+
+
+def tax_breakdown_items(breakdown: str | None) -> list[dict[str, object]]:
+    if not breakdown:
+        return []
+    try:
+        parsed = json.loads(breakdown)
+    except (TypeError, json.JSONDecodeError):
+        return [{"label": "Tax Breakdown", "amount": db.amount_value(breakdown), "total": True}] if db.amount_value(breakdown) else []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    items: list[dict[str, object]] = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            amount = db.amount_value(item.get("amount"))
+            if not amount:
+                continue
+            items.append(
+                {
+                    "label": str(item.get("label") or "Tax"),
+                    "amount": amount,
+                    "total": bool(item.get("total")),
+                }
+            )
+    return items
 
 
 def editable_select(form_id: str, name: str, display, options: list[str], selected: str | None = None, required: bool = False) -> str:

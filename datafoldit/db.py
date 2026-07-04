@@ -85,6 +85,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             hours REAL DEFAULT 0,
             gross REAL DEFAULT 0,
             tax REAL DEFAULT 0,
+            tax_breakdown TEXT,
             commission REAL DEFAULT 0,
             employee_pay REAL DEFAULT 0,
             credit_date TEXT,
@@ -134,6 +135,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "payroll_entries", "attachment_path", "TEXT")
     ensure_column(conn, "payroll_entries", "paystub_sent", "TEXT DEFAULT 'N'")
     ensure_column(conn, "payroll_entries", "tax", "REAL DEFAULT 0")
+    ensure_column(conn, "payroll_entries", "tax_breakdown", "TEXT")
     ensure_column(conn, "invoices", "commission_pct", "REAL DEFAULT 30")
     ensure_column(conn, "invoices", "commission_amount", "REAL DEFAULT 0")
     backfill_invoice_commissions(conn)
@@ -361,8 +363,8 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
         """
         INSERT INTO payroll_entries
             (month, first_name, last_name, vendor, client, job_start, job_end,
-             vendor_pay, pct, hours, gross, tax, commission, employee_pay, credit_date, attachment_path, paystub_sent)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             vendor_pay, pct, hours, gross, tax, tax_breakdown, commission, employee_pay, credit_date, attachment_path, paystub_sent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             month,
@@ -377,6 +379,7 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             hours,
             gross,
             tax,
+            clean_text(payload.get("tax_breakdown")),
             commission,
             employee_pay,
             normalize_date(payload.get("credit_date")),
@@ -413,12 +416,13 @@ def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dic
     month = normalize_month(payload.get("month")) or row["month"]
     vendor_pay, pct, hours, gross, tax, commission, employee_pay = payroll_amounts(payload)
     attachment_path = clean_text(payload.get("attachment_path")) or row["attachment_path"]
+    tax_breakdown = clean_text(payload.get("tax_breakdown")) or row["tax_breakdown"]
     conn.execute(
         """
         UPDATE payroll_entries
         SET month = ?, first_name = ?, last_name = ?, vendor = ?, client = ?,
             job_start = ?, job_end = ?, vendor_pay = ?, pct = ?, hours = ?,
-            gross = ?, tax = ?, commission = ?, employee_pay = ?, credit_date = ?,
+            gross = ?, tax = ?, tax_breakdown = ?, commission = ?, employee_pay = ?, credit_date = ?,
             attachment_path = ?, paystub_sent = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
@@ -435,6 +439,7 @@ def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dic
             hours,
             gross,
             tax,
+            tax_breakdown,
             commission,
             employee_pay,
             normalize_date(payload.get("credit_date")),

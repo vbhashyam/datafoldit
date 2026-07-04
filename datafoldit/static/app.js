@@ -291,6 +291,7 @@
         "hours",
         "gross",
         "tax",
+        "tax_breakdown",
         "commission",
         "employee_pay",
         "credit_date",

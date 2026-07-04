@@ -595,6 +595,9 @@ class DataFoldCoreTests(unittest.TestCase):
                 "last_name": "Rao",
                 "client": "Acme Client",
                 "amount": "42",
+                "gross": "100",
+                "tax": "10",
+                "tax_breakdown": '[{"label":"Federal Income Tax","amount":10,"total":true}]',
             },
         )
         bank_html = render_bank(self.conn)
@@ -657,6 +660,9 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Read payroll file(s)", payroll_html)
         self.assertIn("Vendor Pay", payroll_html)
         self.assertIn("Tax", payroll_html)
+        self.assertIn("Net Pay", payroll_html)
+        self.assertIn("tax-info", payroll_html)
+        self.assertIn("Federal Income Tax", payroll_html)
         self.assertNotIn("Employee Pay", payroll_html)
         self.assertIn('id="payroll-row-form-', payroll_html)
         self.assertIn('action="/payroll/update"', payroll_html)
@@ -760,14 +766,19 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertAlmostEqual(rama["hours"], 168.0, places=2)
         self.assertAlmostEqual(rama["gross"], 6468.0, places=2)
         self.assertAlmostEqual(rama["tax"], 816.49, places=2)
+        self.assertIn("Federal Income Tax", rama["tax_breakdown"])
+        self.assertIn("Arizona State Tax", rama["tax_breakdown"])
+        self.assertAlmostEqual(rama["employee_pay"], 5651.51, places=2)
         self.assertEqual(ajitha["client"], "HHSC")
         self.assertAlmostEqual(ajitha["vendor_pay"], 45.50, places=2)
         self.assertAlmostEqual(ajitha["hours"], 145.5, places=2)
         self.assertAlmostEqual(ajitha["gross"], 6620.25, places=2)
         self.assertAlmostEqual(ajitha["tax"], 1119.44, places=2)
+        self.assertAlmostEqual(ajitha["employee_pay"], 5500.81, places=2)
         html = render_paystub_bulk_review(self.conn, rows)
         self.assertIn("Bulk Paystub Review", html)
         self.assertIn("Tax", html)
+        self.assertIn("Net Pay", html)
         self.assertIn("816.49", html)
 
     def test_bulk_bank_review_and_save_selected_rows(self):

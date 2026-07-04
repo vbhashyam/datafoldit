@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -24,6 +25,13 @@ DATE_RE = re.compile(
     re.I,
 )
 PAY_PERIOD_RE = re.compile(f"({DATE_RE.pattern})\\s*-\\s*({DATE_RE.pattern})", re.I)
+PAYRUN_TAX_COLUMNS = [
+    ("Federal Income Tax", "federal income tax"),
+    ("Federal Unemployment Tax", "federal unemployment tax"),
+    ("Texas State Unemployment Tax", "texas state unemployment tax"),
+    ("Arizona State Tax", "arizona state tax"),
+    ("Arizona State Unemployment Tax", "arizona state unemployment tax"),
+]
 
 
 def extract_paystub_from_file(path: str | Path) -> dict[str, Any]:
@@ -140,6 +148,7 @@ def parse_payrun_row(item: dict[str, Any], source: Path) -> dict[str, Any]:
     gross = db.amount_value(item.get("total earnings") or item.get("regular pay - primary job role"))
     vendor_pay = round(gross / hours, 2) if gross and hours else 0.0
     tax = db.amount_value(item.get("total deductions"))
+    tax_breakdown = payrun_tax_breakdown(item, tax)
     client, vendor = infer_client_vendor(item.get("work location"))
     return {
         "month": (period_end or period_start or payment_date or "")[:7],
@@ -154,6 +163,7 @@ def parse_payrun_row(item: dict[str, Any], source: Path) -> dict[str, Any]:
         "hours": hours,
         "gross": gross,
         "tax": tax,
+        "tax_breakdown": tax_breakdown,
         "commission": 0,
         "employee_pay": db.amount_value(item.get("net pay")),
         "credit_date": payment_date,
@@ -164,6 +174,17 @@ def parse_payrun_row(item: dict[str, Any], source: Path) -> dict[str, Any]:
 
 def normalize_header(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def payrun_tax_breakdown(item: dict[str, Any], total_tax: float) -> str:
+    lines: list[dict[str, float | str]] = []
+    for label, key in PAYRUN_TAX_COLUMNS:
+        amount = db.amount_value(item.get(key))
+        if amount:
+            lines.append({"label": label, "amount": round(amount, 2)})
+    if total_tax:
+        lines.append({"label": "Total Deductions", "amount": round(total_tax, 2), "total": True})
+    return json.dumps(lines, separators=(",", ":")) if lines else ""
 
 
 def parse_payrun_hours(value: Any) -> float:
@@ -240,6 +261,11 @@ def parse_paystub_text(text: str) -> dict[str, Any]:
     gross = extract_regular_pay_amount(lines) or money_after_label(lines, "Total Gross Pay") or 0.0
     net_pay = money_after_label(lines, "Net Pay") or money_after_label(lines, "YOUR NET PAY IS") or 0.0
     deductions = round(gross - net_pay, 2) if gross and net_pay and gross >= net_pay else 0.0
+    tax_breakdown = (
+        json.dumps([{"label": "Total Deductions", "amount": deductions, "total": True}], separators=(",", ":"))
+        if deductions
+        else ""
+    )
     return {
         "month": (period_end or period_start or payment_date or "")[:7],
         "first_name": first_name,
@@ -253,6 +279,7 @@ def parse_paystub_text(text: str) -> dict[str, Any]:
         "hours": hours,
         "gross": gross,
         "tax": deductions,
+        "tax_breakdown": tax_breakdown,
         "commission": 0,
         "employee_pay": net_pay,
         "credit_date": payment_date,
