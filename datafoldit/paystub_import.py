@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from openpyxl import load_workbook
 
 from . import db
 from .transaction_import import extract_text as extract_attachment_text
@@ -21,17 +25,106 @@ DATE_RE = re.compile(
     re.I,
 )
 PAY_PERIOD_RE = re.compile(f"({DATE_RE.pattern})\\s*-\\s*({DATE_RE.pattern})", re.I)
+PAYRUN_TAX_COLUMNS = [
+    ("Federal Income Tax", "federal income tax"),
+    ("Federal Unemployment Tax", "federal unemployment tax"),
+    ("Texas State Unemployment Tax", "texas state unemployment tax"),
+    ("Arizona State Tax", "arizona state tax"),
+    ("Arizona State Unemployment Tax", "arizona state unemployment tax"),
+]
 
 
 def extract_paystub_from_file(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser()
     if not source.exists():
         raise FileNotFoundError(source)
+    if source.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
+        rows = extract_payrun_rows(source)
+        if not rows:
+            raise RuntimeError("No payroll rows found in the payrun workbook.")
+        return rows[0]
     text = extract_paystub_text(source)
     fields = parse_paystub_text(text)
     fields["attachment_path"] = str(source)
     fields["raw_text_excerpt"] = text[:3000]
     return fields
+
+
+def extract_paystub_rows_from_file(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path).expanduser()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    if source.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
+        rows = extract_payrun_rows(source)
+        if not rows:
+            raise RuntimeError("No payroll rows found in the payrun workbook.")
+        return rows
+    return [extract_paystub_from_file(source)]
+
+
+def backfill_payroll_tax_breakdowns_from_attachments(conn) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, month, first_name, last_name, gross, tax, employee_pay, attachment_path
+        FROM payroll_entries
+        WHERE COALESCE(tax_breakdown, '') = ''
+          AND COALESCE(attachment_path, '') != ''
+        """
+    ).fetchall()
+    cache: dict[str, list[dict[str, Any]]] = {}
+    updated = 0
+    for row in rows:
+        source = Path(row["attachment_path"])
+        if source.suffix.lower() not in {".xls", ".xlsx", ".xlsm"} or not source.exists():
+            continue
+        try:
+            parsed_rows = cache.setdefault(str(source), extract_payrun_rows(source))
+        except Exception:
+            continue
+        match = matching_payrun_row(row, parsed_rows)
+        if not match or not match.get("tax_breakdown"):
+            continue
+        conn.execute(
+            """
+            UPDATE payroll_entries
+            SET tax_breakdown = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (match["tax_breakdown"], row["id"]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
+def matching_payrun_row(row, parsed_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    first_name = normalized_name(row["first_name"])
+    last_name = normalized_name(row["last_name"])
+    month = str(row["month"] or "")
+    for parsed in parsed_rows:
+        if month and parsed.get("month") != month:
+            continue
+        if first_name and normalized_name(parsed.get("first_name")) != first_name:
+            continue
+        if last_name and normalized_name(parsed.get("last_name")) != last_name:
+            continue
+        if not close_amount(row["gross"], parsed.get("gross")):
+            continue
+        if db.amount_value(row["tax"]) and not close_amount(row["tax"], parsed.get("tax")):
+            continue
+        if db.amount_value(row["employee_pay"]) and not close_amount(row["employee_pay"], parsed.get("employee_pay")):
+            continue
+        return parsed
+    return None
+
+
+def normalized_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def close_amount(left: Any, right: Any) -> bool:
+    return abs(db.amount_value(left) - db.amount_value(right)) < 0.01
 
 
 def extract_paystub_text(path: Path) -> str:
@@ -41,6 +134,144 @@ def extract_paystub_text(path: Path) -> str:
     if not useful_text(text):
         raise RuntimeError("Could not read enough paystub text from the uploaded file.")
     return text
+
+
+def extract_payrun_rows(path: Path) -> list[dict[str, Any]]:
+    workbook_path = path
+    temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    if path.suffix.lower() == ".xls":
+        temp_dir = tempfile.TemporaryDirectory(prefix="datafoldit-payrun-")
+        try:
+            workbook_path = convert_xls_to_xlsx(path, Path(temp_dir.name))
+        except Exception:
+            if temp_dir:
+                temp_dir.cleanup()
+            raise
+    try:
+        workbook = load_workbook(workbook_path, data_only=True, read_only=True)
+        try:
+            sheet = workbook.worksheets[0]
+            rows = list(sheet.iter_rows(values_only=True))
+        finally:
+            workbook.close()
+    finally:
+        if temp_dir:
+            temp_dir.cleanup()
+    if not rows:
+        return []
+    headers = [normalize_header(value) for value in rows[0]]
+    extracted: list[dict[str, Any]] = []
+    for values in rows[1:]:
+        item = {headers[index]: values[index] for index in range(min(len(headers), len(values)))}
+        if not item.get("employee name") or not item.get("payment date"):
+            continue
+        parsed = parse_payrun_row(item, path)
+        if parsed:
+            extracted.append(parsed)
+    return extracted
+
+
+def convert_xls_to_xlsx(path: Path, outdir: Path) -> Path:
+    soffice = find_tool("soffice")
+    if not soffice:
+        raise RuntimeError("Could not read old .xls payrun files because LibreOffice/soffice is not installed.")
+    profile_dir = outdir / "lo-profile"
+    result = subprocess.run(
+        [
+            soffice,
+            "--headless",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--convert-to",
+            "xlsx",
+            "--outdir",
+            str(outdir),
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not convert .xls payrun file to .xlsx for import.")
+    converted = outdir / f"{path.stem}.xlsx"
+    if not converted.exists():
+        matches = sorted(outdir.glob("*.xlsx"))
+        if not matches:
+            raise RuntimeError("Converted payrun workbook was not found.")
+        converted = matches[0]
+    return converted
+
+
+def parse_payrun_row(item: dict[str, Any], source: Path) -> dict[str, Any]:
+    full_name = str(item.get("employee name") or "").strip()
+    first_name, last_name = split_name(full_name)
+    payment_date = db.normalize_date(item.get("payment date"))
+    period_start = db.normalize_date(item.get("payperiod start"))
+    period_end = db.normalize_date(item.get("payperiod end"))
+    hours = parse_payrun_hours(item.get("regular pay - primary job role hours"))
+    gross = db.amount_value(item.get("total earnings") or item.get("regular pay - primary job role"))
+    vendor_pay = round(gross / hours, 2) if gross and hours else 0.0
+    tax = db.amount_value(item.get("total deductions"))
+    tax_breakdown = payrun_tax_breakdown(item, tax)
+    client, vendor = infer_client_vendor(item.get("work location"))
+    return {
+        "month": (period_end or period_start or payment_date or "")[:7],
+        "first_name": first_name,
+        "last_name": last_name,
+        "vendor": vendor,
+        "client": client,
+        "job_start": period_start,
+        "job_end": period_end,
+        "vendor_pay": vendor_pay,
+        "pct": 0,
+        "hours": hours,
+        "gross": gross,
+        "tax": tax,
+        "tax_breakdown": tax_breakdown,
+        "commission": 0,
+        "employee_pay": db.amount_value(item.get("net pay")),
+        "credit_date": payment_date,
+        "attachment_path": str(source),
+        "paystub_sent": "Y",
+    }
+
+
+def normalize_header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def payrun_tax_breakdown(item: dict[str, Any], total_tax: float) -> str:
+    lines: list[dict[str, float | str]] = []
+    for label, key in PAYRUN_TAX_COLUMNS:
+        amount = db.amount_value(item.get(key))
+        if amount:
+            lines.append({"label": label, "amount": round(amount, 2)})
+    if total_tax:
+        lines.append({"label": "Total Deductions", "amount": round(total_tax, 2), "total": True})
+    return json.dumps(lines, separators=(",", ":")) if lines else ""
+
+
+def parse_payrun_hours(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d+):(\d{1,2})", text)
+    if match:
+        return round(float(match.group(1)) + float(match.group(2)) / 60, 4)
+    return db.amount_value(text)
+
+
+def infer_client_vendor(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip()
+    lower = text.lower()
+    if "american express" in lower or "amex" in lower:
+        return "AMEX", "QUANTUM CORE TECHNOLOGIES"
+    if "health and human services" in lower or "hhsc" in lower:
+        return "HHSC", "SRB SYSTEMS"
+    return "", ""
 
 
 def pdftotext(path: Path) -> str:
@@ -65,7 +296,14 @@ def find_tool(name: str) -> str | None:
     found = shutil.which(name)
     if found:
         return found
-    for directory in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+    bundled_bin = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin"
+    for directory in (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        str(bundled_bin),
+        "/Applications/LibreOffice.app/Contents/MacOS",
+    ):
         candidate = Path(directory) / name
         if candidate.exists():
             return str(candidate)
@@ -88,6 +326,11 @@ def parse_paystub_text(text: str) -> dict[str, Any]:
     gross = extract_regular_pay_amount(lines) or money_after_label(lines, "Total Gross Pay") or 0.0
     net_pay = money_after_label(lines, "Net Pay") or money_after_label(lines, "YOUR NET PAY IS") or 0.0
     deductions = round(gross - net_pay, 2) if gross and net_pay and gross >= net_pay else 0.0
+    tax_breakdown = (
+        json.dumps([{"label": "Total Deductions", "amount": deductions, "total": True}], separators=(",", ":"))
+        if deductions
+        else ""
+    )
     return {
         "month": (period_end or period_start or payment_date or "")[:7],
         "first_name": first_name,
@@ -100,7 +343,9 @@ def parse_paystub_text(text: str) -> dict[str, Any]:
         "pct": 0,
         "hours": hours,
         "gross": gross,
-        "commission": deductions,
+        "tax": deductions,
+        "tax_breakdown": tax_breakdown,
+        "commission": 0,
         "employee_pay": net_pay,
         "credit_date": payment_date,
         "paystub_sent": "Y",
