@@ -112,6 +112,17 @@ def import_payroll(conn, workbook) -> int:
     for item in rows_from_table(workbook, "Payroll", "Payroll"):
         if item.get("Month") is None or not any(item.get(key) for key in ("Gross", "Hours", "First Name")):
             continue
+        vendor_pay = value_from(item, "Vendor Pay", "Pay Rate / Hour")
+        hours = item.get("Hours")
+        gross = value_from(item, "Gross", "Total Earnings")
+        tax = value_from(item, "Tax", "Total Deductions")
+        commission = value_from(item, "Commission", "Commission Amount")
+        employee_pay = value_from(item, "Net Pay", "Employee Pay")
+        pct = value_from(item, "Pct", "Commission %")
+        if is_legacy_invoice_rate_payroll_row(gross, tax, commission, employee_pay, hours, pct):
+            vendor_pay = round(db.amount_value(employee_pay) / db.amount_value(hours), 2)
+            gross = employee_pay
+            commission = 0
         rows.append(
             {
                 "month": item.get("Month"),
@@ -121,18 +132,44 @@ def import_payroll(conn, workbook) -> int:
                 "client": item.get("Client"),
                 "job_start": item.get("Job Start"),
                 "job_end": item.get("Job End"),
-                "vendor_pay": value_from(item, "Vendor Pay", "Pay Rate / Hour"),
-                "pct": value_from(item, "Pct", "Commission %"),
-                "hours": item.get("Hours"),
-                "gross": value_from(item, "Gross", "Total Earnings"),
-                "tax": value_from(item, "Tax", "Total Deductions"),
+                "vendor_pay": vendor_pay,
+                "pct": pct,
+                "hours": hours,
+                "gross": gross,
+                "tax": tax,
                 "tax_breakdown": item.get("Tax Breakdown"),
-                "commission": value_from(item, "Commission", "Commission Amount"),
-                "employee_pay": value_from(item, "Net Pay", "Employee Pay"),
+                "commission": commission,
+                "employee_pay": employee_pay,
                 "credit_date": value_from(item, "Credit Date", "Payment Date"),
             }
         )
     return db.bulk_insert(conn, "payroll_entries", rows)
+
+
+def is_legacy_invoice_rate_payroll_row(
+    gross: Any,
+    tax: Any,
+    commission: Any,
+    employee_pay: Any,
+    hours: Any,
+    pct: Any,
+) -> bool:
+    gross_value = db.amount_value(gross)
+    tax_value = db.amount_value(tax)
+    commission_value = db.amount_value(commission)
+    employee_pay_value = db.amount_value(employee_pay)
+    hours_value = db.amount_value(hours)
+    pct_value = db.amount_value(pct)
+    expected_commission = gross_value * (db.commission_fraction(pct_value) or 0.3)
+    return (
+        tax_value == 0
+        and commission_value > 0
+        and employee_pay_value > 0
+        and gross_value > employee_pay_value
+        and hours_value > 0
+        and abs(gross_value - (employee_pay_value + commission_value)) < 0.02
+        and abs(commission_value - expected_commission) < 0.02
+    )
 
 
 def import_invoices(conn, workbook) -> int:
