@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 from datafoldit import db
 from datafoldit.excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from datafoldit.invoice_pdf import parse_invoice_text
-from datafoldit.paystub_import import parse_paystub_text
+from datafoldit.paystub_import import extract_paystub_rows_from_file, parse_paystub_text
 from datafoldit.transaction_import import parse_transaction_text
 from datafoldit.web import (
     add_bank_transaction_batch,
@@ -27,6 +27,7 @@ from datafoldit.web import (
     render_invoice_edit,
     render_invoices,
     render_payroll,
+    render_paystub_bulk_review,
     render_paystub_review,
     render_transaction_bulk_review,
 )
@@ -265,11 +266,9 @@ class DataFoldCoreTests(unittest.TestCase):
                 "job_start": "2026-05-01",
                 "job_end": "2026-05-31",
                 "vendor_pay": "60",
-                "pct": "30",
                 "hours": "20",
                 "gross": "1200",
-                "commission": "360",
-                "employee_pay": "840",
+                "tax": "120",
                 "credit_date": "2026-06-10",
                 "paystub_sent": "Yes",
             },
@@ -277,7 +276,7 @@ class DataFoldCoreTests(unittest.TestCase):
         bank = self.conn.execute("SELECT date, type, detail, amount, attachment_path FROM bank_transactions WHERE id = ?", (bank_id,)).fetchone()
         expense = self.conn.execute("SELECT date, vendor, paid_by, amount FROM expenses WHERE id = ?", (expense_id,)).fetchone()
         invoice = self.conn.execute("SELECT date, invoice_number, customer, amount, balance_due FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-        payroll = self.conn.execute("SELECT month, first_name, last_name, vendor, client, hours, gross, commission, employee_pay, credit_date, attachment_path, paystub_sent FROM payroll_entries WHERE id = ?", (payroll_id,)).fetchone()
+        payroll = self.conn.execute("SELECT month, first_name, last_name, vendor, client, hours, gross, tax, commission, employee_pay, credit_date, attachment_path, paystub_sent FROM payroll_entries WHERE id = ?", (payroll_id,)).fetchone()
         self.assertEqual(bank["date"], "2026-06-01")
         self.assertEqual(bank["type"], "Deposit")
         self.assertEqual(bank["detail"], "Updated payment")
@@ -294,7 +293,9 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual(payroll["first_name"], "Updated")
         self.assertEqual(payroll["client"], "Updated Client")
         self.assertAlmostEqual(payroll["hours"], 20.0)
-        self.assertAlmostEqual(payroll["employee_pay"], 840.0)
+        self.assertAlmostEqual(payroll["tax"], 120.0)
+        self.assertAlmostEqual(payroll["commission"], 0.0)
+        self.assertAlmostEqual(payroll["employee_pay"], 1080.0)
         self.assertEqual(payroll["attachment_path"], "/tmp/original-paystub.pdf")
         self.assertEqual(payroll["paystub_sent"], "Y")
 
@@ -327,7 +328,7 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertEqual([row["client"] for row in alex_rows], ["Acme Client"])
         self.assertEqual([row["first_name"] for row in beta_rows], ["Maya"])
 
-    def test_payroll_calculates_from_rate_hours_and_commission_percent(self):
+    def test_payroll_calculates_from_rate_hours_and_tax(self):
         db.add_payroll_entry(
             self.conn,
             {
@@ -335,14 +336,15 @@ class DataFoldCoreTests(unittest.TestCase):
                 "first_name": "Alex",
                 "last_name": "Rao",
                 "vendor_pay": "60",
-                "pct": "30",
                 "hours": "10",
+                "tax": "75",
             },
         )
         row = db.rows_for_table(self.conn, "payroll_entries")[0]
         self.assertAlmostEqual(row["gross"], 600.00, places=2)
-        self.assertAlmostEqual(row["commission"], 180.00, places=2)
-        self.assertAlmostEqual(row["employee_pay"], 420.00, places=2)
+        self.assertAlmostEqual(row["tax"], 75.00, places=2)
+        self.assertAlmostEqual(row["commission"], 0.00, places=2)
+        self.assertAlmostEqual(row["employee_pay"], 525.00, places=2)
 
     def test_invoice_ocr_text_parser(self):
         text = """
@@ -518,6 +520,7 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn('class="grid cols-4"', html)
         self.assertIn("Total Invoice", html)
         self.assertIn("Received", html)
+        self.assertIn("Commission Received", html)
         self.assertIn("Outstanding", html)
         self.assertIn("Overdue", html)
         self.assertNotIn("Next #", html)
@@ -552,6 +555,9 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn("Due Status", html)
         self.assertIn("Overdue", html)
         self.assertIn("$100.00", html)
+        self.assertIn("Commission %", html)
+        self.assertIn("Commission Amount", html)
+        self.assertIn('sort=commission_amount', html)
         self.assertIn('sort=balance_due', html)
         self.assertIn('sort=invoice_number', html)
         self.assertIn('id="invoice-row-form-', html)
@@ -647,6 +653,11 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertIn('data-inline-create-cancel', payroll_html)
         self.assertIn('href="/payroll?sort=name&direction=asc"', payroll_html)
         self.assertIn('href="/payroll?sort=gross&direction=asc"', payroll_html)
+        self.assertIn("Bulk Payrun Import", payroll_html)
+        self.assertIn("Read payroll file(s)", payroll_html)
+        self.assertIn("Vendor Pay", payroll_html)
+        self.assertIn("Tax", payroll_html)
+        self.assertNotIn("Employee Pay", payroll_html)
         self.assertIn('id="payroll-row-form-', payroll_html)
         self.assertIn('action="/payroll/update"', payroll_html)
         self.assertIn('name="first_name"', payroll_html)
@@ -694,12 +705,14 @@ class DataFoldCoreTests(unittest.TestCase):
         self.assertAlmostEqual(parsed["vendor_pay"], 45.50, places=2)
         self.assertAlmostEqual(parsed["hours"], 176.0, places=2)
         self.assertAlmostEqual(parsed["gross"], 8008.0, places=2)
+        self.assertAlmostEqual(parsed["tax"], 1452.50, places=2)
         self.assertAlmostEqual(parsed["employee_pay"], 6555.50, places=2)
         self.assertEqual(parsed["paystub_sent"], "Y")
         parsed["attachment_path"] = "/tmp/paystub.pdf"
         html = render_paystub_review(self.conn, parsed)
         self.assertIn("Review Imported Paystub", html)
         self.assertIn("Ajitha", html)
+        self.assertIn("Tax", html)
         saved = add_payroll_batch(
             self.conn,
             {
@@ -716,6 +729,7 @@ class DataFoldCoreTests(unittest.TestCase):
                 "pct_0": [str(parsed["pct"])],
                 "hours_0": [str(parsed["hours"])],
                 "gross_0": [str(parsed["gross"])],
+                "tax_0": [str(parsed["tax"])],
                 "commission_0": [str(parsed["commission"])],
                 "employee_pay_0": [str(parsed["employee_pay"])],
                 "credit_date_0": [parsed["credit_date"]],
@@ -724,9 +738,37 @@ class DataFoldCoreTests(unittest.TestCase):
             },
         )
         self.assertEqual(saved, 1)
-        row = self.conn.execute("SELECT first_name, paystub_sent, gross FROM payroll_entries WHERE first_name = 'Ajitha'").fetchone()
+        row = self.conn.execute("SELECT first_name, paystub_sent, gross, tax FROM payroll_entries WHERE first_name = 'Ajitha'").fetchone()
         self.assertEqual(row["paystub_sent"], "Y")
         self.assertAlmostEqual(row["gross"], 8008.0, places=2)
+        self.assertAlmostEqual(row["tax"], 1452.50, places=2)
+
+    def test_payrun_xls_bulk_import_rows(self):
+        payrun_path = Path("/Users/vamsikrishnabhashyam/Downloads/Employee_Payrun_Summary.xls")
+        if not payrun_path.exists():
+            self.skipTest(f"Missing payrun workbook: {payrun_path}")
+        try:
+            rows = extract_paystub_rows_from_file(payrun_path)
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+        self.assertGreaterEqual(len(rows), 2)
+        rama = next(row for row in rows if row["first_name"].upper().startswith("RAMA"))
+        ajitha = next(row for row in rows if row["first_name"].upper().startswith("AJITHA"))
+        self.assertEqual(rama["client"], "AMEX")
+        self.assertEqual(rama["vendor"], "QUANTUM CORE TECHNOLOGIES")
+        self.assertAlmostEqual(rama["vendor_pay"], 38.50, places=2)
+        self.assertAlmostEqual(rama["hours"], 168.0, places=2)
+        self.assertAlmostEqual(rama["gross"], 6468.0, places=2)
+        self.assertAlmostEqual(rama["tax"], 816.49, places=2)
+        self.assertEqual(ajitha["client"], "HHSC")
+        self.assertAlmostEqual(ajitha["vendor_pay"], 45.50, places=2)
+        self.assertAlmostEqual(ajitha["hours"], 145.5, places=2)
+        self.assertAlmostEqual(ajitha["gross"], 6620.25, places=2)
+        self.assertAlmostEqual(ajitha["tax"], 1119.44, places=2)
+        html = render_paystub_bulk_review(self.conn, rows)
+        self.assertIn("Bulk Paystub Review", html)
+        self.assertIn("Tax", html)
+        self.assertIn("816.49", html)
 
     def test_bulk_bank_review_and_save_selected_rows(self):
         html = render_transaction_bulk_review(
@@ -809,6 +851,8 @@ class DataFoldCoreTests(unittest.TestCase):
                 "invoice_number_0": ["INV-BULK-001"],
                 "customer_0": ["Bulk Client LLC"],
                 "amount_0": ["1250"],
+                "commission_pct_0": ["30"],
+                "commission_amount_0": ["375"],
                 "due_date_0": ["2026-06-29"],
                 "status_0": ["Not Received"],
                 "balance_due_0": ["1250"],

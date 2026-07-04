@@ -44,8 +44,6 @@
   function updatePayroll(form) {
     var rate = numberValue(form, "vendor_pay");
     var hours = numberValue(form, "hours");
-    var pct = numberValue(form, "pct") || 30;
-    var fraction = pct <= 1 ? pct : pct / 100;
     var gross = numberValue(form, "gross");
     if (rate && hours) {
       gross = rate * hours;
@@ -53,23 +51,22 @@
     if (!gross) {
       return;
     }
-    var commission = numberValue(form, "commission") || gross * fraction;
-    var employeePay = numberValue(form, "employee_pay") || gross - commission;
+    var tax = numberValue(form, "tax");
+    var employeePay = numberValue(form, "employee_pay") || gross - tax;
     setMoney(form, "gross", gross);
-    setMoney(form, "commission", commission);
     setMoney(form, "employee_pay", employeePay);
   }
 
   function ensurePayrollDefaults(form) {
     var pctInput = controlFor(form, "pct");
     if (pctInput && !pctInput.value) {
-      pctInput.value = "30";
+      pctInput.value = "0";
     }
   }
 
   function initPayrollCalculator(form) {
     ensurePayrollDefaults(form);
-    ["vendor_pay", "hours", "pct", "gross", "commission"].forEach(function (name) {
+    ["vendor_pay", "hours", "gross", "tax"].forEach(function (name) {
       var input = controlFor(form, name);
       if (input) {
         input.addEventListener("input", function () {
@@ -133,9 +130,22 @@
     var dueInput = controlFor(form, "due_date");
     var amountInput = controlFor(form, "amount");
     var balanceInput = controlFor(form, "balance_due");
+    var commissionPctInput = controlFor(form, "commission_pct");
+    var commissionAmountInput = controlFor(form, "commission_amount");
     var row = form.closest("tr");
     var badge = row ? row.querySelector("[data-invoice-inline-due-status]") : null;
+    var commissionTarget = row ? row.querySelector("[data-invoice-inline-commission]") : null;
     var status = statusInput ? statusInput.value : "Not Received";
+    var amount = numberValue(form, "amount");
+    var commissionPct = numberValue(form, "commission_pct") || 30;
+    var commissionFraction = commissionPct <= 1 ? commissionPct : commissionPct / 100;
+    var calculatedCommission = amount * commissionFraction;
+    if (commissionAmountInput && !commissionAmountInput.value && amount) {
+      commissionAmountInput.value = calculatedCommission.toFixed(2);
+    }
+    if (commissionTarget) {
+      commissionTarget.textContent = amount ? formatMoney(calculatedCommission) : "--";
+    }
     if (balanceInput && amountInput && !balanceInput.value && amountInput.value) {
       balanceInput.value = status === "Received" || status === "Void" ? "0.00" : numberValue(form, "amount").toFixed(2);
     }
@@ -175,7 +185,7 @@
   }
 
   function initInvoiceForm(form) {
-    ["status", "due_date", "amount"].forEach(function (name) {
+    ["status", "due_date", "amount", "commission_pct"].forEach(function (name) {
       var input = controlFor(form, name);
       if (input) {
         input.addEventListener("input", function () {
@@ -267,7 +277,7 @@
     var fields = {
       bank: ["date", "type", "category", "detail", "source", "amount", "notes", "attachment_path"],
       expense: ["date", "category", "vendor", "description", "amount", "paid_by", "frequency", "notes", "attachment_path"],
-      invoice: ["date", "invoice_number", "customer", "status", "due_date", "amount", "balance_due", "source_pdf"],
+      invoice: ["date", "invoice_number", "customer", "status", "due_date", "amount", "commission_pct", "commission_amount", "balance_due", "source_pdf"],
       payroll: [
         "month",
         "first_name",
@@ -280,6 +290,7 @@
         "pct",
         "hours",
         "gross",
+        "tax",
         "commission",
         "employee_pay",
         "credit_date",

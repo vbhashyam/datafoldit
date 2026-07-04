@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from . import db
 from .excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
 from .invoice_pdf import extract_invoice_from_pdf
-from .paystub_import import extract_paystub_from_file
+from .paystub_import import extract_paystub_from_file, extract_paystub_rows_from_file
 from .transaction_import import extract_transaction_from_file
 
 
@@ -49,7 +49,21 @@ MONTHS = [
 ]
 BANK_SORT_KEYS = {"date", "type", "category", "detail", "source", "amount", "signed", "attachment"}
 EXPENSE_SORT_KEYS = {"date", "category", "vendor", "description", "amount", "paid_by", "frequency", "notes", "attachment"}
-PAYROLL_SORT_KEYS = {"month", "name", "vendor", "client", "hours", "gross", "commission", "employee_pay", "credit_date", "paystub_sent", "attachment"}
+PAYROLL_SORT_KEYS = {
+    "month",
+    "name",
+    "vendor",
+    "client",
+    "job_start",
+    "job_end",
+    "vendor_pay",
+    "hours",
+    "gross",
+    "tax",
+    "credit_date",
+    "paystub_sent",
+    "attachment",
+}
 INLINE_EXTRACT_PATHS = {
     "/bank/extract-inline",
     "/expenses/extract-inline",
@@ -253,11 +267,12 @@ def make_handler(db_path: Path):
                     if not uploaded_files:
                         raise ValueError("Choose a paystub file to import")
                     saved_paths = [save_uploaded_file(uploaded) for uploaded in uploaded_files]
-                    if len(saved_paths) == 1:
-                        extracted = extract_paystub_from_file(saved_paths[0])
+                    extracted_rows = extract_paystub_batch(saved_paths)
+                    good_rows = [row for row in extracted_rows if row.get("_ok")]
+                    if len(extracted_rows) == 1 and len(good_rows) == 1:
+                        extracted = good_rows[0]
                         self.send_html(render_paystub_review(self.conn, extracted, "Review extracted paystub before saving"))
                     else:
-                        extracted_rows = extract_paystub_batch(saved_paths)
                         self.send_html(render_paystub_bulk_review(self.conn, extracted_rows, "Review extracted paystubs before saving"))
                     return
                 if parsed.path == "/expenses/extract-inline":
@@ -669,7 +684,7 @@ def sort_payroll_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[
     def value(row: sqlite3.Row):
         if sort_key == "name":
             return payroll_employee_name(row).lower()
-        if sort_key in {"hours", "gross", "commission", "employee_pay"}:
+        if sort_key in {"vendor_pay", "hours", "gross", "tax"}:
             return db.amount_value(row[sort_key])
         if sort_key == "paystub_sent":
             return "yes" if str(row["paystub_sent"] or "").upper() == "Y" else "no"
@@ -997,10 +1012,11 @@ def extract_paystub_batch(paths: list[Path]) -> list[dict]:
     extracted_rows: list[dict] = []
     for path in paths:
         try:
-            extracted = extract_paystub_from_file(path)
-            extracted["_ok"] = True
-            extracted["_source_name"] = path.name
-            extracted_rows.append(extracted)
+            rows = extract_paystub_rows_from_file(path)
+            for extracted in rows:
+                extracted["_ok"] = True
+                extracted["_source_name"] = path.name
+                extracted_rows.append(extracted)
         except Exception as exc:
             extracted_rows.append(
                 {
@@ -1054,6 +1070,8 @@ def invoice_extract_payload(extracted: dict, saved_path: Path) -> dict:
         "status": status,
         "due_date": extracted.get("due_date"),
         "amount": extracted.get("amount"),
+        "commission_pct": extracted.get("commission_pct") or "30",
+        "commission_amount": extracted.get("commission_amount"),
         "balance_due": extracted.get("balance_due"),
         "source_pdf": str(extracted.get("source_pdf") or saved_path),
         "source_name": saved_path.name,
@@ -1074,6 +1092,7 @@ def payroll_extract_payload(extracted: dict, saved_path: Path) -> dict:
         "pct",
         "hours",
         "gross",
+        "tax",
         "commission",
         "employee_pay",
         "credit_date",
@@ -1141,6 +1160,7 @@ def add_payroll_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) ->
             "pct": form_value(fields, f"pct_{index}"),
             "hours": form_value(fields, f"hours_{index}"),
             "gross": form_value(fields, f"gross_{index}"),
+            "tax": form_value(fields, f"tax_{index}"),
             "commission": form_value(fields, f"commission_{index}"),
             "employee_pay": form_value(fields, f"employee_pay_{index}"),
             "credit_date": form_value(fields, f"credit_date_{index}"),
@@ -1170,6 +1190,8 @@ def add_invoice_batch(conn: sqlite3.Connection, fields: dict[str, list[str]]) ->
             "invoice_number": form_value(fields, f"invoice_number_{index}"),
             "customer": form_value(fields, f"customer_{index}"),
             "amount": form_value(fields, f"amount_{index}"),
+            "commission_pct": form_value(fields, f"commission_pct_{index}"),
+            "commission_amount": form_value(fields, f"commission_amount_{index}"),
             "due_date": form_value(fields, f"due_date_{index}"),
             "status": form_value(fields, f"status_{index}"),
             "balance_due": form_value(fields, f"balance_due_{index}"),
@@ -1295,6 +1317,11 @@ def signed_money(value) -> str:
     css = "positive" if numeric >= 0 else "negative"
     sign = "" if numeric >= 0 else "-"
     return f'<span class="{css}">{sign}${abs(numeric):,.2f}</span>'
+
+
+def percent_display(value) -> str:
+    numeric = db.amount_value(value)
+    return f"{numeric:g}%"
 
 
 def nav_link(path: str, label: str, current: str) -> str:
@@ -1428,7 +1455,7 @@ def render_dashboard(conn, flash: str | None = None) -> str:
       {metric_card("Bank Balance", money(metrics["current_balance"]), "Current account", "good")}
       {metric_card("Expenses", money(metrics["total_expenses"]), f'{metrics["active_month"]}: {money(metrics["month_expenses"])}', "warn")}
       {metric_card("Invoices Open", money(metrics["invoice_outstanding"]), f'Total invoiced {money(metrics["invoice_total"])}', "info")}
-      {metric_card("Commission", money(metrics["payroll_commission"]), f'Gross payroll {money(metrics["payroll_gross"])}', "good")}
+      {metric_card("Commission Received", money(metrics["invoice_commission_received"]), "Paid invoices", "good")}
     </div>
     """
     hero = f"""
@@ -1745,7 +1772,7 @@ def render_transaction_bulk_review(conn, extracted_rows: list[dict], flash: str 
         attachment_path = extracted.get("attachment_path") or ""
         source_name = extracted.get("_source_name") or Path(attachment_path).name or "Uploaded file"
         attachment_html = attachment_link(attachment_path) or esc(source_name)
-        if not extracted.get("_ok"):
+        if extracted.get("_ok") is False:
             rows_html.append(
                 f"""
                 <tr class="bulk-error-row">
@@ -1994,14 +2021,14 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     filters = {**{"year": "", "month": "", "candidate": "", "sort": "month", "direction": "desc"}, **(filters or {})}
     rows = sort_payroll_rows(filter_payroll_rows(db.rows_for_table(conn, "payroll_entries"), filters), filters)
     gross = sum(db.amount_value(row["gross"]) for row in rows)
-    commission = sum(db.amount_value(row["commission"]) for row in rows)
-    employee_pay = sum(db.amount_value(row["employee_pay"]) for row in rows)
+    tax = sum(db.amount_value(row["tax"]) for row in rows)
+    pending_credits = sum(db.amount_value(row["gross"]) for row in rows if not row["credit_date"])
     scope = payroll_label(filters)
     kpis = f"""
     <div class="grid cols-4">
-      {metric_card("Gross", money(gross), scope)}
-      {metric_card("Commission", money(commission), "Company share")}
-      {metric_card("Employee Pay", money(employee_pay), "Credits")}
+      {metric_card("Total Payroll Paid", money(gross), scope)}
+      {metric_card("Tax", money(tax), "Deductions")}
+      {metric_card("Pending Credits", money(pending_credits), "No credit date", "warn")}
       {metric_card("Entries", str(len(rows)), "Visible rows")}
     </div>
     """
@@ -2009,10 +2036,6 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
     create_actions = f"""
     <div class="row-actions">
       <form id="{form_id}" class="inline-row-form" method="post" action="/payroll/create" enctype="multipart/form-data" data-payroll-form data-inline-create-form>
-        <input type="hidden" name="pct" value="30">
-        <input type="hidden" name="job_start" value="">
-        <input type="hidden" name="job_end" value="">
-        <input type="hidden" name="vendor_pay" value="">
         <input type="hidden" name="attachment_path" value="">
       </form>
       <button class="button compact icon-button inline-save-button" type="submit" form="{form_id}" aria-label="Save payroll entry" title="Save">
@@ -2042,10 +2065,12 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
             create_input(form_id, "vendor", "text", placeholder="Vendor"),
             create_input(form_id, "client", "text", placeholder="Client", list_id="client-options")
             + datalist_options("client-options", db.distinct_values(conn, "payroll_entries", "client")),
+            create_input(form_id, "job_start", "date"),
+            create_input(form_id, "job_end", "date"),
+            create_input(form_id, "vendor_pay", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "hours", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "gross", "number", step="0.01", placeholder="0.00"),
-            create_input(form_id, "commission", "number", step="0.01", placeholder="0.00"),
-            create_input(form_id, "employee_pay", "number", step="0.01", placeholder="0.00"),
+            create_input(form_id, "tax", "number", step="0.01", placeholder="0.00"),
             create_input(form_id, "credit_date", "date"),
             create_select(form_id, "paystub_sent", ["No", "Yes"], "No"),
             inline_file_cell(
@@ -2069,10 +2094,12 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
                 editable_name(form_id, row),
                 editable_input(form_id, "vendor", row["vendor"], row["vendor"]),
                 editable_input(form_id, "client", row["client"], row["client"]),
+                editable_input(form_id, "job_start", row["job_start"], row["job_start"], "date"),
+                editable_input(form_id, "job_end", row["job_end"], row["job_end"], "date"),
+                editable_input(form_id, "vendor_pay", money(row["vendor_pay"]), currency_input(row["vendor_pay"]), "number", step="0.01"),
                 editable_input(form_id, "hours", row["hours"], currency_input(row["hours"]), "number", step="0.01"),
                 editable_input(form_id, "gross", money(row["gross"]), currency_input(row["gross"]), "number", step="0.01"),
-                editable_input(form_id, "commission", money(row["commission"]), currency_input(row["commission"]), "number", step="0.01"),
-                editable_input(form_id, "employee_pay", money(row["employee_pay"]), currency_input(row["employee_pay"]), "number", step="0.01"),
+                editable_input(form_id, "tax", money(row["tax"]), currency_input(row["tax"]), "number", step="0.01"),
                 editable_input(form_id, "credit_date", row["credit_date"], row["credit_date"], "date"),
                 editable_select(form_id, "paystub_sent", paystub_sent_label, ["No", "Yes"], paystub_sent_label),
                 attachment_link(row["attachment_path"] if "attachment_path" in row.keys() else None),
@@ -2090,12 +2117,6 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
                     ),
                     employee_label,
                     "payroll entry",
-                    hidden_fields=[
-                        ("job_start", row["job_start"]),
-                        ("job_end", row["job_end"]),
-                        ("vendor_pay", currency_input(row["vendor_pay"])),
-                        ("pct", currency_input(row["pct"])),
-                    ],
                 ),
             ]
         )
@@ -2105,19 +2126,21 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
             sort_header("Name", "name", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Vendor", "vendor", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Client", "client", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Job Start", "job_start", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Job End", "job_end", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Vendor Pay", "vendor_pay", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Hours", "hours", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Gross", "gross", filters, "/payroll", ["year", "month", "candidate"]),
-            sort_header("Commission", "commission", filters, "/payroll", ["year", "month", "candidate"]),
-            sort_header("Employee Pay", "employee_pay", filters, "/payroll", ["year", "month", "candidate"]),
+            sort_header("Tax", "tax", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Credit Date", "credit_date", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Paystub Sent", "paystub_sent", filters, "/payroll", ["year", "month", "candidate"]),
             sort_header("Attachment", "attachment", filters, "/payroll", ["year", "month", "candidate"]),
             "Action",
         ],
         table_rows,
-        raw_columns=set(range(12)),
-        money_columns={5, 6, 7},
-        raw_headers=set(range(11)),
+        raw_columns=set(range(14)),
+        money_columns={6, 8, 9},
+        raw_headers=set(range(13)),
         row_attrs=row_attrs,
     )
     ledger_panel = f"""
@@ -2134,7 +2157,22 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
       <div class="table-wrap">{table}</div>
     </section>
     """
-    content = section_stack(kpis, ledger_panel)
+    import_panel = """
+    <section class="panel">
+      <div class="panel-header"><h2>Bulk Payrun Import</h2><span>XLS, XLSX, PDF, PNG, and other paystub files</span></div>
+      <div class="panel-body">
+        <form method="post" action="/payroll/extract" enctype="multipart/form-data" class="form-grid">
+          <label class="span-4">Payrun / paystub files
+            <input type="file" name="attachment" multiple>
+          </label>
+          <div class="span-4 actions">
+            <button class="button" type="submit">Read payroll file(s)</button>
+          </div>
+        </form>
+      </div>
+    </section>
+    """
+    content = section_stack(kpis, import_panel, ledger_panel)
     return layout(conn, "Payroll", "Payroll", "/payroll", content, flash, payroll_filter_form(conn, filters))
 
 
@@ -2151,14 +2189,15 @@ def render_paystub_review(conn, extracted: dict, flash: str | None = None) -> st
       {input_field("vendor", "Vendor", "text", value=extracted.get("vendor"), css="span-2")}
       {input_field("job_start", "Job Start", "date", value=extracted.get("job_start"))}
       {input_field("job_end", "Job End", "date", value=extracted.get("job_end"))}
-      {input_field("vendor_pay", "Pay Rate / Hour", "number", value=currency_input(extracted.get("vendor_pay")), step="0.01")}
-      {input_field("pct", "Commission %", "number", value=currency_input(extracted.get("pct")), step="0.01")}
+      {input_field("vendor_pay", "Vendor Pay / Hour", "number", value=currency_input(extracted.get("vendor_pay")), step="0.01")}
       {input_field("hours", "Hours", "number", value=currency_input(extracted.get("hours")), step="0.01")}
       {input_field("gross", "Gross", "number", value=currency_input(extracted.get("gross")), step="0.01")}
-      {input_field("commission", "Commission", "number", value=currency_input(extracted.get("commission")), step="0.01")}
-      {input_field("employee_pay", "Payroll After Commission", "number", value=currency_input(extracted.get("employee_pay")), step="0.01")}
+      {input_field("tax", "Tax", "number", value=currency_input(extracted.get("tax")), step="0.01")}
       {input_field("credit_date", "Credit Date", "date", value=extracted.get("credit_date"))}
       {select_field("paystub_sent", "Paystub Sent", ["No", "Yes"], selected="Yes" if extracted.get("paystub_sent") == "Y" else "No")}
+      <input type="hidden" name="pct" value="{esc(extracted.get("pct") or "")}">
+      <input type="hidden" name="commission" value="{esc(extracted.get("commission") or "")}">
+      <input type="hidden" name="employee_pay" value="{esc(extracted.get("employee_pay") or "")}">
       <input type="hidden" name="attachment_path" value="{esc(attachment_path)}">
       <div class="span-4 actions">
         <button class="button" type="submit">Save imported paystub</button>
@@ -2181,13 +2220,13 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
         attachment_path = extracted.get("attachment_path") or ""
         source_name = extracted.get("_source_name") or Path(attachment_path).name or "Uploaded file"
         attachment_html = attachment_link(attachment_path) or esc(source_name)
-        if not extracted.get("_ok"):
+        if extracted.get("_ok") is False:
             rows_html.append(
                 f"""
                 <tr class="bulk-error-row">
                   <td></td>
                   <td>{attachment_html}</td>
-                  <td colspan="9"><strong>Could not read this paystub.</strong> {esc(extracted.get("error") or "")}</td>
+                  <td colspan="10"><strong>Could not read this paystub.</strong> {esc(extracted.get("error") or "")}</td>
                 </tr>
                 """
             )
@@ -2200,18 +2239,19 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <td>{bulk_input(f"month_{form_index}", "Month", "month", extracted.get("month"), required=True)}</td>
               <td>{bulk_input(f"first_name_{form_index}", "First name", "text", extracted.get("first_name"))}</td>
               <td>{bulk_input(f"last_name_{form_index}", "Last name", "text", extracted.get("last_name"))}</td>
-              <td>{bulk_input(f"vendor_pay_{form_index}", "Rate", "number", currency_input(extracted.get("vendor_pay")), step="0.01")}</td>
+              <td>{bulk_input(f"vendor_{form_index}", "Vendor", "text", extracted.get("vendor"))}</td>
+              <td>{bulk_input(f"client_{form_index}", "Client", "text", extracted.get("client"))}</td>
+              <td>{bulk_input(f"job_start_{form_index}", "Job start", "date", extracted.get("job_start"))}</td>
+              <td>{bulk_input(f"job_end_{form_index}", "Job end", "date", extracted.get("job_end"))}</td>
+              <td>{bulk_input(f"vendor_pay_{form_index}", "Vendor pay", "number", currency_input(extracted.get("vendor_pay")), step="0.01")}</td>
               <td>{bulk_input(f"hours_{form_index}", "Hours", "number", currency_input(extracted.get("hours")), step="0.01")}</td>
               <td>{bulk_input(f"gross_{form_index}", "Gross", "number", currency_input(extracted.get("gross")), step="0.01")}</td>
-              <td>{bulk_input(f"commission_{form_index}", "Deductions", "number", currency_input(extracted.get("commission")), step="0.01")}</td>
-              <td>{bulk_input(f"employee_pay_{form_index}", "Net pay", "number", currency_input(extracted.get("employee_pay")), step="0.01")}</td>
+              <td>{bulk_input(f"tax_{form_index}", "Tax", "number", currency_input(extracted.get("tax")), step="0.01")}</td>
               <td>{bulk_input(f"credit_date_{form_index}", "Payment date", "date", extracted.get("credit_date"))}</td>
               <td><select name="paystub_sent_{form_index}" aria-label="Paystub sent"><option value="Y" selected>Yes</option><option value="N">No</option></select></td>
-              <input type="hidden" name="vendor_{form_index}" value="{esc(extracted.get("vendor") or "")}">
-              <input type="hidden" name="client_{form_index}" value="{esc(extracted.get("client") or "")}">
-              <input type="hidden" name="job_start_{form_index}" value="{esc(extracted.get("job_start") or "")}">
-              <input type="hidden" name="job_end_{form_index}" value="{esc(extracted.get("job_end") or "")}">
               <input type="hidden" name="pct_{form_index}" value="{esc(extracted.get("pct") or "")}">
+              <input type="hidden" name="commission_{form_index}" value="{esc(extracted.get("commission") or "")}">
+              <input type="hidden" name="employee_pay_{form_index}" value="{esc(extracted.get("employee_pay") or "")}">
             </tr>
             """
         )
@@ -2229,11 +2269,14 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <th>Month</th>
               <th>First</th>
               <th>Last</th>
-              <th>Rate</th>
+              <th>Vendor</th>
+              <th>Client</th>
+              <th>Job Start</th>
+              <th>Job End</th>
+              <th>Vendor Pay</th>
               <th>Hours</th>
               <th>Gross</th>
-              <th>Deductions</th>
-              <th>Net</th>
+              <th>Tax</th>
               <th>Payment Date</th>
               <th>Paystub Sent</th>
             </tr>
@@ -2252,7 +2295,19 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
 
 
 INVOICE_STATUS_OPTIONS = ["Received", "Not Received", "Void"]
-INVOICE_SORT_KEYS = {"date", "invoice_number", "customer", "status", "due_status", "due_date", "amount", "balance_due", "attachment"}
+INVOICE_SORT_KEYS = {
+    "date",
+    "invoice_number",
+    "customer",
+    "status",
+    "due_status",
+    "due_date",
+    "amount",
+    "commission_pct",
+    "commission_amount",
+    "balance_due",
+    "attachment",
+}
 
 
 def invoice_status_options_html(selected: str | None = None) -> str:
@@ -2330,7 +2385,7 @@ def sort_invoice_rows(rows: list[sqlite3.Row], filters: dict[str, str]) -> list[
             if days is None:
                 return 999999
             return days
-        if sort_key in {"amount", "balance_due"}:
+        if sort_key in {"amount", "commission_pct", "commission_amount", "balance_due"}:
             return db.amount_value(row[sort_key])
         if sort_key == "attachment":
             return str(row["source_pdf"] or "").lower()
@@ -2560,6 +2615,8 @@ def render_invoice_edit(conn, invoice_id: int, flash: str | None = None) -> str:
       {input_field("invoice_number", "Invoice #", "text", value=row["invoice_number"], required=True)}
       {datalist_field("customer", "Customer / Client", db.distinct_values(conn, "invoices", "customer"), value=row["customer"], required=True)}
       {input_field("amount", "Amount", "number", value=currency_input(row["amount"]), step="0.01", required=True)}
+      {input_field("commission_pct", "Commission %", "number", value=currency_input(row["commission_pct"]), step="0.01")}
+      {input_field("commission_amount", "Commission Amount", "number", value=currency_input(row["commission_amount"]), step="0.01")}
       {input_field("due_date", "Due Date", "date", value=row["due_date"])}
       {invoice_status_select(invoice_status_label(row))}
       {input_field("balance_due", "Balance Due", "number", value=currency_input(row["balance_due"]), step="0.01")}
@@ -2584,6 +2641,11 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     active_rows = [row for row in rows if not row["is_void"]]
     invoice_total = sum(db.amount_value(row["amount"]) for row in active_rows)
     invoice_paid = sum(db.amount_value(row["amount"]) for row in active_rows if invoice_status_label(row) == "Received")
+    commission_received = sum(
+        db.amount_value(row["commission_amount"])
+        for row in active_rows
+        if invoice_status_label(row) == "Received"
+    )
     invoice_outstanding = sum(db.amount_value(row["balance_due"]) for row in active_rows)
     overdue_rows = [row for row in active_rows if invoice_is_open(row) and invoice_due_status(row) == "Overdue"]
     invoice_overdue = sum(db.amount_value(row["balance_due"]) for row in overdue_rows)
@@ -2592,6 +2654,7 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     <div class="grid cols-4">
       {metric_card("Total Invoice", money(invoice_total), scope)}
       {metric_card("Received", money(invoice_paid), "Closed")}
+      {metric_card("Commission Received", money(commission_received), "Paid invoices", "good")}
       {metric_card("Outstanding", money(invoice_outstanding), "Receivable")}
       {metric_card("Overdue", money(invoice_overdue), f"{len(overdue_rows)} past due", "warn")}
     </div>
@@ -2625,6 +2688,8 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             '<span class="status-badge due" data-invoice-inline-due-status>Draft</span>',
             create_input(create_form_id, "due_date", "date"),
             create_input(create_form_id, "amount", "number", step="0.01", placeholder="0.00", required=True),
+            create_input(create_form_id, "commission_pct", "number", step="0.01", value="30", placeholder="30"),
+            '<span class="inline-derived-value" data-invoice-inline-commission>--</span>',
             create_input(create_form_id, "balance_due", "number", step="0.01", placeholder="0.00"),
             inline_file_cell(create_form_id, "invoice", "/invoices/extract-inline"),
             create_actions,
@@ -2643,6 +2708,8 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
                 invoice_due_status_badge(row),
                 editable_input(form_id, "due_date", row["due_date"], row["due_date"], "date"),
                 editable_input(form_id, "amount", money(row["amount"]), currency_input(row["amount"]), "number", step="0.01", required=True),
+                editable_input(form_id, "commission_pct", percent_display(row["commission_pct"]), currency_input(row["commission_pct"]), "number", step="0.01"),
+                money(row["commission_amount"]),
                 editable_input(form_id, "balance_due", money(row["balance_due"]), currency_input(row["balance_due"]), "number", step="0.01"),
                 attachment_link(row["source_pdf"] if "source_pdf" in row.keys() else None),
                 action_controls(
@@ -2665,14 +2732,16 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             invoice_sort_header("Due Status", "due_status", filters),
             invoice_sort_header("Due Date", "due_date", filters),
             invoice_sort_header("Amount", "amount", filters),
+            invoice_sort_header("Commission %", "commission_pct", filters),
+            invoice_sort_header("Commission Amount", "commission_amount", filters),
             invoice_sort_header("Balance Due", "balance_due", filters),
             invoice_sort_header("Attachment", "attachment", filters),
             "Action",
         ],
         table_rows,
-        raw_columns=set(range(10)),
-        money_columns={6, 7},
-        raw_headers=set(range(9)),
+        raw_columns=set(range(12)),
+        money_columns={6, 8, 9},
+        raw_headers=set(range(11)),
         row_attrs=row_attrs,
     )
     ledger_panel = f"""
@@ -2703,6 +2772,8 @@ def render_invoice_review(conn, extracted: dict, flash: str | None = None) -> st
       {input_field("invoice_number", "Invoice #", "text", value=extracted.get("invoice_number") or db.next_invoice_number(conn), required=True)}
       {datalist_field("customer", "Customer / Client", db.distinct_values(conn, "invoices", "customer"), value=extracted.get("customer"), required=True)}
       {input_field("amount", "Amount", "number", value=currency_input(extracted.get("amount")), step="0.01", required=True)}
+      {input_field("commission_pct", "Commission %", "number", value=currency_input(extracted.get("commission_pct") or "30"), step="0.01")}
+      {input_field("commission_amount", "Commission Amount", "number", value=currency_input(extracted.get("commission_amount")), step="0.01")}
       {input_field("due_date", "Due Date", "date", value=extracted.get("due_date"))}
       {invoice_status_select(invoice_status_choice(extracted.get("status"), extracted.get("received"), extracted.get("is_void")))}
       {input_field("balance_due", "Balance Due", "number", value=currency_input(extracted.get("balance_due")), step="0.01")}
@@ -2735,13 +2806,13 @@ def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | No
         source_pdf = extracted.get("source_pdf") or ""
         source_name = extracted.get("_source_name") or Path(source_pdf).name or "Uploaded file"
         source_html = attachment_link(source_pdf) or esc(source_name)
-        if not extracted.get("_ok"):
+        if extracted.get("_ok") is False:
             rows_html.append(
                 f"""
                 <tr class="bulk-error-row">
                   <td></td>
                   <td>{source_html}</td>
-                  <td colspan="7"><strong>Could not read this file.</strong> {esc(extracted.get("error") or "")}</td>
+                  <td colspan="9"><strong>Could not read this file.</strong> {esc(extracted.get("error") or "")}</td>
                 </tr>
                 """
             )
@@ -2760,6 +2831,8 @@ def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <td><select name="status_{form_index}" aria-label="Status">{invoice_status_options_html(status)}</select></td>
               <td>{bulk_input(f"due_date_{form_index}", "Due date", "date", extracted.get("due_date"))}</td>
               <td>{bulk_input(f"amount_{form_index}", "Amount", "number", currency_input(extracted.get("amount")), step="0.01", required=True)}</td>
+              <td>{bulk_input(f"commission_pct_{form_index}", "Commission percent", "number", currency_input(extracted.get("commission_pct") or "30"), step="0.01")}</td>
+              <td>{bulk_input(f"commission_amount_{form_index}", "Commission amount", "number", currency_input(extracted.get("commission_amount")), step="0.01")}</td>
               <td>{bulk_input(f"balance_due_{form_index}", "Balance due", "number", currency_input(extracted.get("balance_due")), step="0.01")}</td>
             </tr>
             """
@@ -2781,6 +2854,8 @@ def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | No
               <th>Status</th>
               <th>Due Date</th>
               <th>Amount</th>
+              <th>Commission %</th>
+              <th>Commission Amount</th>
               <th>Balance Due</th>
             </tr>
           </thead>

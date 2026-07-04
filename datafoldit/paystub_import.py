@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from openpyxl import load_workbook
 
 from . import db
 from .transaction_import import extract_text as extract_attachment_text
@@ -27,11 +30,28 @@ def extract_paystub_from_file(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser()
     if not source.exists():
         raise FileNotFoundError(source)
+    if source.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
+        rows = extract_payrun_rows(source)
+        if not rows:
+            raise RuntimeError("No payroll rows found in the payrun workbook.")
+        return rows[0]
     text = extract_paystub_text(source)
     fields = parse_paystub_text(text)
     fields["attachment_path"] = str(source)
     fields["raw_text_excerpt"] = text[:3000]
     return fields
+
+
+def extract_paystub_rows_from_file(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path).expanduser()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    if source.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
+        rows = extract_payrun_rows(source)
+        if not rows:
+            raise RuntimeError("No payroll rows found in the payrun workbook.")
+        return rows
+    return [extract_paystub_from_file(source)]
 
 
 def extract_paystub_text(path: Path) -> str:
@@ -41,6 +61,131 @@ def extract_paystub_text(path: Path) -> str:
     if not useful_text(text):
         raise RuntimeError("Could not read enough paystub text from the uploaded file.")
     return text
+
+
+def extract_payrun_rows(path: Path) -> list[dict[str, Any]]:
+    workbook_path = path
+    temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    if path.suffix.lower() == ".xls":
+        temp_dir = tempfile.TemporaryDirectory(prefix="datafoldit-payrun-")
+        try:
+            workbook_path = convert_xls_to_xlsx(path, Path(temp_dir.name))
+        except Exception:
+            if temp_dir:
+                temp_dir.cleanup()
+            raise
+    try:
+        workbook = load_workbook(workbook_path, data_only=True, read_only=True)
+        try:
+            sheet = workbook.worksheets[0]
+            rows = list(sheet.iter_rows(values_only=True))
+        finally:
+            workbook.close()
+    finally:
+        if temp_dir:
+            temp_dir.cleanup()
+    if not rows:
+        return []
+    headers = [normalize_header(value) for value in rows[0]]
+    extracted: list[dict[str, Any]] = []
+    for values in rows[1:]:
+        item = {headers[index]: values[index] for index in range(min(len(headers), len(values)))}
+        if not item.get("employee name") or not item.get("payment date"):
+            continue
+        parsed = parse_payrun_row(item, path)
+        if parsed:
+            extracted.append(parsed)
+    return extracted
+
+
+def convert_xls_to_xlsx(path: Path, outdir: Path) -> Path:
+    soffice = find_tool("soffice")
+    if not soffice:
+        raise RuntimeError("Could not read old .xls payrun files because LibreOffice/soffice is not installed.")
+    profile_dir = outdir / "lo-profile"
+    result = subprocess.run(
+        [
+            soffice,
+            "--headless",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--convert-to",
+            "xlsx",
+            "--outdir",
+            str(outdir),
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not convert .xls payrun file to .xlsx for import.")
+    converted = outdir / f"{path.stem}.xlsx"
+    if not converted.exists():
+        matches = sorted(outdir.glob("*.xlsx"))
+        if not matches:
+            raise RuntimeError("Converted payrun workbook was not found.")
+        converted = matches[0]
+    return converted
+
+
+def parse_payrun_row(item: dict[str, Any], source: Path) -> dict[str, Any]:
+    full_name = str(item.get("employee name") or "").strip()
+    first_name, last_name = split_name(full_name)
+    payment_date = db.normalize_date(item.get("payment date"))
+    period_start = db.normalize_date(item.get("payperiod start"))
+    period_end = db.normalize_date(item.get("payperiod end"))
+    hours = parse_payrun_hours(item.get("regular pay - primary job role hours"))
+    gross = db.amount_value(item.get("total earnings") or item.get("regular pay - primary job role"))
+    vendor_pay = round(gross / hours, 2) if gross and hours else 0.0
+    tax = db.amount_value(item.get("total deductions"))
+    client, vendor = infer_client_vendor(item.get("work location"))
+    return {
+        "month": (period_end or period_start or payment_date or "")[:7],
+        "first_name": first_name,
+        "last_name": last_name,
+        "vendor": vendor,
+        "client": client,
+        "job_start": period_start,
+        "job_end": period_end,
+        "vendor_pay": vendor_pay,
+        "pct": 0,
+        "hours": hours,
+        "gross": gross,
+        "tax": tax,
+        "commission": 0,
+        "employee_pay": db.amount_value(item.get("net pay")),
+        "credit_date": payment_date,
+        "attachment_path": str(source),
+        "paystub_sent": "Y",
+    }
+
+
+def normalize_header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def parse_payrun_hours(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    match = re.fullmatch(r"(\d+):(\d{1,2})", text)
+    if match:
+        return round(float(match.group(1)) + float(match.group(2)) / 60, 4)
+    return db.amount_value(text)
+
+
+def infer_client_vendor(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip()
+    lower = text.lower()
+    if "american express" in lower or "amex" in lower:
+        return "AMEX", "QUANTUM CORE TECHNOLOGIES"
+    if "health and human services" in lower or "hhsc" in lower:
+        return "HHSC", "SRB SYSTEMS"
+    return "", ""
 
 
 def pdftotext(path: Path) -> str:
@@ -65,7 +210,14 @@ def find_tool(name: str) -> str | None:
     found = shutil.which(name)
     if found:
         return found
-    for directory in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+    bundled_bin = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin"
+    for directory in (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        str(bundled_bin),
+        "/Applications/LibreOffice.app/Contents/MacOS",
+    ):
         candidate = Path(directory) / name
         if candidate.exists():
             return str(candidate)
@@ -100,7 +252,8 @@ def parse_paystub_text(text: str) -> dict[str, Any]:
         "pct": 0,
         "hours": hours,
         "gross": gross,
-        "commission": deductions,
+        "tax": deductions,
+        "commission": 0,
         "employee_pay": net_pay,
         "credit_date": payment_date,
         "paystub_sent": "Y",

@@ -84,6 +84,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             pct REAL DEFAULT 0,
             hours REAL DEFAULT 0,
             gross REAL DEFAULT 0,
+            tax REAL DEFAULT 0,
             commission REAL DEFAULT 0,
             employee_pay REAL DEFAULT 0,
             credit_date TEXT,
@@ -102,6 +103,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             received TEXT,
             due_date TEXT,
             amount REAL NOT NULL,
+            commission_pct REAL DEFAULT 30,
+            commission_amount REAL DEFAULT 0,
             status TEXT,
             balance_due REAL DEFAULT 0,
             source_pdf TEXT,
@@ -130,6 +133,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "expenses", "attachment_path", "TEXT")
     ensure_column(conn, "payroll_entries", "attachment_path", "TEXT")
     ensure_column(conn, "payroll_entries", "paystub_sent", "TEXT DEFAULT 'N'")
+    ensure_column(conn, "payroll_entries", "tax", "REAL DEFAULT 0")
+    ensure_column(conn, "invoices", "commission_pct", "REAL DEFAULT 30")
+    ensure_column(conn, "invoices", "commission_amount", "REAL DEFAULT 0")
+    backfill_invoice_commissions(conn)
     ensure_primary_account(conn)
     conn.commit()
 
@@ -138,6 +145,26 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def backfill_invoice_commissions(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE invoices
+        SET commission_pct = 30
+        WHERE commission_pct IS NULL OR commission_pct = 0
+        """
+    )
+    conn.execute(
+        """
+        UPDATE invoices
+        SET commission_amount = ROUND(amount * CASE
+            WHEN commission_pct <= 1 THEN commission_pct
+            ELSE commission_pct / 100.0
+        END, 2)
+        WHERE commission_amount IS NULL OR commission_amount = 0
+        """
+    )
 
 
 def ensure_primary_account(conn: sqlite3.Connection) -> int:
@@ -329,13 +356,13 @@ def update_expense(conn: sqlite3.Connection, expense_id: int, payload: dict[str,
 
 def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     month = normalize_month(payload.get("month")) or (normalize_date(payload.get("month")) or date.today().isoformat())[:7]
-    vendor_pay, pct, hours, gross, commission, employee_pay = payroll_amounts(payload)
+    vendor_pay, pct, hours, gross, tax, commission, employee_pay = payroll_amounts(payload)
     cur = conn.execute(
         """
         INSERT INTO payroll_entries
             (month, first_name, last_name, vendor, client, job_start, job_end,
-             vendor_pay, pct, hours, gross, commission, employee_pay, credit_date, attachment_path, paystub_sent)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             vendor_pay, pct, hours, gross, tax, commission, employee_pay, credit_date, attachment_path, paystub_sent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             month,
@@ -349,6 +376,7 @@ def add_payroll_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             pct,
             hours,
             gross,
+            tax,
             commission,
             employee_pay,
             normalize_date(payload.get("credit_date")),
@@ -383,14 +411,14 @@ def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dic
     if row is None:
         raise ValueError("Payroll entry was not found")
     month = normalize_month(payload.get("month")) or row["month"]
-    vendor_pay, pct, hours, gross, commission, employee_pay = payroll_amounts(payload)
+    vendor_pay, pct, hours, gross, tax, commission, employee_pay = payroll_amounts(payload)
     attachment_path = clean_text(payload.get("attachment_path")) or row["attachment_path"]
     conn.execute(
         """
         UPDATE payroll_entries
         SET month = ?, first_name = ?, last_name = ?, vendor = ?, client = ?,
             job_start = ?, job_end = ?, vendor_pay = ?, pct = ?, hours = ?,
-            gross = ?, commission = ?, employee_pay = ?, credit_date = ?,
+            gross = ?, tax = ?, commission = ?, employee_pay = ?, credit_date = ?,
             attachment_path = ?, paystub_sent = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
@@ -406,6 +434,7 @@ def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dic
             pct,
             hours,
             gross,
+            tax,
             commission,
             employee_pay,
             normalize_date(payload.get("credit_date")),
@@ -417,20 +446,21 @@ def update_payroll_entry(conn: sqlite3.Connection, payroll_id: int, payload: dic
     audit(conn, "update", "payroll_entry", payroll_id, payload)
 
 
-def payroll_amounts(payload: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+def payroll_amounts(payload: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
     vendor_pay = amount_value(payload.get("vendor_pay"))
     hours = amount_value(payload.get("hours"))
-    pct = amount_value(payload.get("pct")) if clean_text(payload.get("pct")) is not None else 30.0
+    pct = amount_value(payload.get("pct"))
     gross = amount_value(payload.get("gross"))
     if gross == 0 and vendor_pay and hours:
         gross = vendor_pay * hours
+    tax = amount_value(payload.get("tax"))
     commission = amount_value(payload.get("commission"))
-    if commission == 0 and gross:
+    if commission == 0 and gross and pct:
         commission = gross * commission_fraction(pct)
     employee_pay = amount_value(payload.get("employee_pay"))
     if employee_pay == 0 and gross:
-        employee_pay = gross - commission
-    return vendor_pay, pct, hours, round(gross, 2), round(commission, 2), round(employee_pay, 2)
+        employee_pay = gross - tax - commission
+    return vendor_pay, pct, hours, round(gross, 2), round(tax, 2), round(commission, 2), round(employee_pay, 2)
 
 
 def commission_fraction(pct: float) -> float:
@@ -442,6 +472,7 @@ def commission_fraction(pct: float) -> float:
 def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     invoice_date = normalize_date(payload.get("date")) or date.today().isoformat()
     amount = amount_value(payload.get("amount"))
+    commission_pct, commission_amount = invoice_commission_values(payload, amount)
     status, received, is_void = normalize_invoice_status(payload)
     balance_due = amount_value(payload.get("balance_due"))
     if status.lower() == "paid" or str(received).upper() == "Y" or is_void:
@@ -451,8 +482,9 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
     cur = conn.execute(
         """
         INSERT INTO invoices
-            (date, invoice_number, customer, is_void, received, due_date, amount, status, balance_due, source_pdf)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (date, invoice_number, customer, is_void, received, due_date, amount,
+             commission_pct, commission_amount, status, balance_due, source_pdf)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             invoice_date,
@@ -462,6 +494,8 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             received,
             normalize_date(payload.get("due_date")),
             amount,
+            commission_pct,
+            commission_amount,
             status,
             balance_due,
             clean_text(payload.get("source_pdf")),
@@ -473,18 +507,20 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
 
 
 def update_invoice_status(conn: sqlite3.Connection, invoice_id: int, status_value: str) -> None:
-    row = conn.execute("SELECT amount FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    row = conn.execute("SELECT amount, commission_pct FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
     if row is None:
         raise ValueError("Invoice was not found")
     status, received, is_void = normalize_invoice_status({"status": status_value})
     balance_due = 0.0 if received == "Y" or is_void else amount_value(row["amount"])
+    commission_pct, commission_amount = invoice_commission_values({"commission_pct": row["commission_pct"]}, row["amount"])
     conn.execute(
         """
         UPDATE invoices
-        SET status = ?, received = ?, is_void = ?, balance_due = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = ?, received = ?, is_void = ?, balance_due = ?, commission_amount = ?,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (status, received, 1 if is_void else 0, balance_due, invoice_id),
+        (status, received, 1 if is_void else 0, balance_due, commission_amount, invoice_id),
     )
     audit(conn, "update_status", "invoice", invoice_id, {"status": status_value})
 
@@ -495,6 +531,7 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
         raise ValueError("Invoice was not found")
     invoice_date = normalize_date(payload.get("date")) or row["date"]
     amount = amount_value(payload.get("amount"))
+    commission_pct, commission_amount = invoice_commission_values(payload, amount)
     status, received, is_void = normalize_invoice_status(payload)
     balance_due = amount_value(payload.get("balance_due"))
     if status.lower() == "paid" or received == "Y" or is_void:
@@ -506,8 +543,8 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
         """
         UPDATE invoices
         SET date = ?, invoice_number = ?, customer = ?, is_void = ?, received = ?,
-            due_date = ?, amount = ?, status = ?, balance_due = ?, source_pdf = ?,
-            updated_at = CURRENT_TIMESTAMP
+            due_date = ?, amount = ?, commission_pct = ?, commission_amount = ?,
+            status = ?, balance_due = ?, source_pdf = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (
@@ -518,6 +555,8 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
             received,
             normalize_date(payload.get("due_date")),
             amount,
+            commission_pct,
+            commission_amount,
             status,
             balance_due,
             source_pdf,
@@ -525,6 +564,21 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
         ),
     )
     audit(conn, "update", "invoice", invoice_id, payload)
+
+
+def invoice_commission_values(payload: dict[str, Any], amount: Any) -> tuple[float, float]:
+    pct = amount_value(payload.get("commission_pct"))
+    if pct == 0:
+        pct = amount_value(payload.get("commission_percent"))
+    if pct == 0:
+        pct = amount_value(payload.get("pct"))
+    if pct == 0:
+        pct = 30.0
+    commission = amount_value(payload.get("commission_amount"))
+    calculated = amount_value(amount) * commission_fraction(pct)
+    if commission == 0 and calculated:
+        commission = calculated
+    return round(pct, 4), round(commission, 2)
 
 
 def delete_invoice(conn: sqlite3.Connection, invoice_id: int) -> None:
@@ -694,7 +748,8 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         SELECT
             COALESCE(SUM(CASE WHEN is_void = 0 THEN amount ELSE 0 END), 0) AS invoiced,
             COALESCE(SUM(CASE WHEN is_void = 0 THEN balance_due ELSE 0 END), 0) AS outstanding,
-            COALESCE(SUM(CASE WHEN is_void = 0 AND lower(status) = 'paid' THEN amount ELSE 0 END), 0) AS paid
+            COALESCE(SUM(CASE WHEN is_void = 0 AND lower(status) = 'paid' THEN amount ELSE 0 END), 0) AS paid,
+            COALESCE(SUM(CASE WHEN is_void = 0 AND lower(status) = 'paid' THEN commission_amount ELSE 0 END), 0) AS commission_received
         FROM invoices
         """
     ).fetchone()
@@ -702,6 +757,7 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         """
         SELECT
             COALESCE(SUM(gross), 0) AS gross,
+            COALESCE(SUM(tax), 0) AS tax,
             COALESCE(SUM(commission), 0) AS commission,
             COALESCE(SUM(employee_pay), 0) AS employee_pay
         FROM payroll_entries
@@ -715,7 +771,9 @@ def dashboard_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
         "invoice_total": amount_value(invoice_row["invoiced"]),
         "invoice_paid": amount_value(invoice_row["paid"]),
         "invoice_outstanding": amount_value(invoice_row["outstanding"]),
+        "invoice_commission_received": amount_value(invoice_row["commission_received"]),
         "payroll_gross": amount_value(payroll_row["gross"]),
+        "payroll_tax": amount_value(payroll_row["tax"]),
         "payroll_commission": amount_value(payroll_row["commission"]),
         "payroll_employee_pay": amount_value(payroll_row["employee_pay"]),
     }
