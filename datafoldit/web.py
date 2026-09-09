@@ -19,9 +19,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
-from . import db
+from . import db, auth
 from .excel_io import DEFAULT_SOURCE_XLSX, export_report_workbook, import_company_workbook
-from .invoice_pdf import extract_invoice_from_pdf
+from .invoice_pdf import extract_invoice_from_pdf, extract_invoices_from_file
 from .paystub_import import (
     backfill_payroll_tax_breakdowns_from_attachments,
     extract_paystub_from_file,
@@ -106,7 +106,7 @@ def main() -> None:
     handler = make_handler(db_path)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"DataFold IT dashboard running at http://{args.host}:{args.port}")
-    print(f"Password: {os.environ.get('DATAFOLDIT_PASSWORD', DEFAULT_PASSWORD)}")
+    print("Individual account login and MFA required. Shared-password login is disabled.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -118,13 +118,15 @@ def main() -> None:
 def make_handler(db_path: Path):
     class DataFoldHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
-            print("%s - %s" % (self.address_string(), format % args))
+            # Do not log invitation tokens or other URL query parameters.
+            print("%s - %s %s" % (self.address_string(), self.command, urlparse(self.path).path))
 
         @property
         def conn(self) -> sqlite3.Connection:
             if not hasattr(self, "_conn"):
                 self._conn = db.connect(db_path)
                 db.init_db(self._conn)
+                auth.init(self._conn)
             return self._conn
 
         def finish(self) -> None:
@@ -138,17 +140,13 @@ def make_handler(db_path: Path):
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query)
+            if auth.handle(self, path, query):
+                return
             if path.startswith("/static/"):
                 self.serve_static(path)
                 return
             if path == "/healthz":
                 self.send_text("ok\n")
-                return
-            if path == "/login":
-                self.send_html(login_page(error=first(query, "error")))
-                return
-            if path == "/logout":
-                self.redirect("/login", clear_cookie=True)
                 return
             if not self.is_authenticated():
                 self.redirect("/login")
@@ -180,6 +178,16 @@ def make_handler(db_path: Path):
                 self.send_html(render_invoices(self.conn, flash, invoice_filter_from_query(query)))
             elif path == "/invoices/edit":
                 self.send_html(render_invoice_edit(self.conn, int(first(query, "id") or 0), flash))
+            elif path == "/invoices/review-upload":
+                names = query.get("upload", [])
+                if not names or len(names) > 20 or any(Path(name).name != name for name in names):
+                    self.send_error(HTTPStatus.BAD_REQUEST)
+                    return
+                paths = [(UPLOAD_DIR / name).resolve() for name in names]
+                if any(not path.is_relative_to(UPLOAD_DIR.resolve()) or not path.is_file() for path in paths):
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_html(render_invoice_bulk_review(self.conn, extract_invoice_batch(paths), "Review each detected invoice before saving."))
             elif path == "/reports":
                 self.send_html(render_reports(self.conn, flash, filters))
             elif path == "/export.xlsx":
@@ -191,12 +199,7 @@ def make_handler(db_path: Path):
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/login":
-                fields = self.read_form()
-                if verify_password(fields.get("password", [""])[0]):
-                    self.redirect("/", set_cookie=session_cookie())
-                else:
-                    self.redirect("/login?error=Invalid+password")
+            if auth.handle(self, parsed.path, parse_qs(parsed.query), post=True):
                 return
             if not self.is_authenticated():
                 if parsed.path in INLINE_EXTRACT_PATHS:
@@ -233,29 +236,34 @@ def make_handler(db_path: Path):
                         uploaded_files = uploaded_file_list(files.get("attachment"))
                         if uploaded_files:
                             source_paths = [save_uploaded_file(uploaded) for uploaded in uploaded_files]
-                            if len(source_paths) == 1:
-                                extracted = extract_invoice_from_pdf(source_paths[0])
-                                self.send_html(render_invoice_review(self.conn, extracted, "Review extracted invoice fields before saving"))
+                            extracted_rows = extract_invoice_batch(source_paths)
+                            if len(extracted_rows) == 1 and extracted_rows[0].get("_ok"):
+                                self.send_html(render_invoice_review(self.conn, extracted_rows[0], "Review extracted invoice fields before saving"))
                             else:
-                                extracted_rows = extract_invoice_batch(source_paths)
                                 self.send_html(render_invoice_bulk_review(self.conn, extracted_rows, "Review extracted invoice fields before saving"))
                             return
                         source_path = upload_fields.get("pdf_path", "")
                     else:
                         source_path = flatten_form(self.read_form()).get("pdf_path", "")
+                    if os.environ.get("DATAFOLDIT_SHARED_TEST") == "1":
+                        raise ValueError("Upload a file to import it. Server file paths are disabled in shared testing.")
                     if not source_path:
                         raise ValueError("Upload an invoice file or enter a PDF path")
-                    extracted = extract_invoice_from_pdf(source_path)
-                    self.send_html(render_invoice_review(self.conn, extracted, "Review extracted invoice fields before saving"))
+                    self.send_html(render_invoice_bulk_review(self.conn, extract_invoice_batch([Path(source_path)]), "Review extracted invoices before saving"))
                     return
                 if parsed.path == "/invoices/extract-inline":
                     upload_fields, files = self.read_multipart_form()
-                    uploaded = first_uploaded_file(files.get("attachment"))
+                    uploaded = uploaded_file_list(files.get("attachment"))
                     if not uploaded:
                         raise ValueError("Choose an invoice file to import")
-                    saved_path = save_uploaded_file(uploaded)
-                    extracted = extract_invoice_from_pdf(saved_path)
-                    self.send_json(invoice_extract_payload(extracted, saved_path))
+                    if len(uploaded) > 20:
+                        raise ValueError("Upload at most 20 files at a time.")
+                    saved_paths = [save_uploaded_file(file) for file in uploaded]
+                    rows = extract_invoice_batch(saved_paths)
+                    if len(rows) != 1 or not rows[0].get("_ok") or rows[0].get("_warning"):
+                        self.send_json({"review_url": "/invoices/review-upload?" + urlencode({"upload": [path.name for path in saved_paths]}, doseq=True)})
+                    else:
+                        self.send_json(invoice_extract_payload(rows[0], saved_paths[0]))
                     return
                 if parsed.path == "/invoices/create-bulk":
                     saved_count = add_invoice_batch(self.conn, self.read_form())
@@ -404,11 +412,16 @@ def make_handler(db_path: Path):
             self.wfile.write(content)
 
         def read_form(self) -> dict[str, list[str]]:
+            if hasattr(self, "_form"):
+                return self._form
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length).decode("utf-8")
-            return parse_qs(body, keep_blank_values=True)
+            self._form = parse_qs(body, keep_blank_values=True)
+            return self._form
 
         def read_multipart_form(self) -> tuple[dict[str, str], dict[str, list[FileInfo]]]:
+            if hasattr(self, "_multipart"):
+                return self._multipart
             content_type = self.headers.get("Content-Type", "")
             if not content_type.startswith("multipart/form-data"):
                 raise ValueError("Upload form must use multipart/form-data")
@@ -438,7 +451,8 @@ def make_handler(db_path: Path):
                 else:
                     charset = part.get_content_charset() or "utf-8"
                     fields[name] = payload.decode(charset, errors="replace").strip()
-            return fields, files
+            self._multipart = (fields, files)
+            return self._multipart
 
         def read_fields_with_optional_attachment(self) -> dict[str, str]:
             if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
@@ -446,14 +460,32 @@ def make_handler(db_path: Path):
                 saved_paths = save_optional_uploaded_files(files.get("attachment"))
                 if saved_paths:
                     fields["attachment_path"] = join_attachment_paths(saved_paths)
-                return {key: value for key, value in fields.items() if value.strip() != ""}
+                return {key: value for key, value in fields.items() if value.strip() != "" or key == "received_date"}
             return flatten_form(self.read_form())
 
         def send_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+            user = getattr(self, "account", None)
+            csrf = getattr(self, "form_csrf", None) if urlparse(self.path).path in {"/login", "/accept"} else (user["csrf"] if user else None)
+            if csrf:
+                body = re.sub(r'(<form\b[^>]*\bmethod="post"[^>]*>)', lambda match: match[0] + f'<input type="hidden" name="csrf" value="{esc(csrf)}">', body, flags=re.I)
+            if user:
+                body = body.replace('</head>', f'<meta name="csrf-token" content="{esc(user["csrf"])}"></head>')
+                body = body.replace('<body>', f'<body data-role="{esc(user["role"])}">')
+                welcome_name = user["email"].split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").title()
+                identity = f'<span class="account-identity"><strong class="account-welcome">Welcome {esc(welcome_name)}!!</strong><span>{esc(user["email"])} · {esc(user["role"])}</span></span>'
+                body = body.replace('<div class="header-actions">', '<div class="header-actions">' + identity)
+                if user["role"] == "admin":
+                    body = body.replace('</nav>', nav_link('/admin/users', 'User access', urlparse(self.path).path) + '</nav>')
             payload = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if getattr(self, "form_cookie", None):
+                self.send_header("Set-Cookie", self.form_cookie)
             self.end_headers()
             self.wfile.write(payload)
 
@@ -487,11 +519,11 @@ def make_handler(db_path: Path):
 
         def serve_static(self, path: str) -> None:
             requested = (STATIC_DIR / path.removeprefix("/static/")).resolve()
-            if not str(requested).startswith(str(STATIC_DIR.resolve())) or not requested.exists():
+            if not requested.is_relative_to(STATIC_DIR.resolve()) or not requested.is_file():
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             content = requested.read_bytes()
-            content_type = {".css": "text/css", ".js": "application/javascript", ".png": "image/png"}.get(
+            content_type = {".css": "text/css", ".js": "application/javascript", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(
                 requested.suffix, "application/octet-stream"
             )
             self.send_response(HTTPStatus.OK)
@@ -503,23 +535,23 @@ def make_handler(db_path: Path):
 
         def serve_attachment(self, path: str) -> None:
             requested = (UPLOAD_DIR / path.removeprefix("/attachments/")).resolve()
-            if not str(requested).startswith(str(UPLOAD_DIR.resolve())) or not requested.exists():
+            if not requested.is_relative_to(UPLOAD_DIR.resolve()) or not requested.is_file():
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             content = requested.read_bytes()
             content_type = content_type_for(requested)
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Disposition", f'inline; filename="{requested.name}"')
+            disposition = "inline" if content_type in {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain"} else "attachment"
+            self.send_header("Content-Disposition", f'{disposition}; filename="{requested.name}"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "sandbox")
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
 
         def is_authenticated(self) -> bool:
-            raw = self.headers.get("Cookie", "")
-            cookie = SimpleCookie(raw)
-            morsel = cookie.get(SESSION_COOKIE)
-            return bool(morsel and verify_session(morsel.value))
+            return bool(getattr(self, "account", None))
 
     return DataFoldHandler
 
@@ -978,10 +1010,10 @@ def extract_invoice_batch(paths: list[Path]) -> list[dict]:
     extracted_rows: list[dict] = []
     for path in paths:
         try:
-            extracted = extract_invoice_from_pdf(path)
-            extracted["_ok"] = True
-            extracted["_source_name"] = path.name
-            extracted_rows.append(extracted)
+            for extracted in extract_invoices_from_file(path):
+                extracted.setdefault("_ok", True)
+                extracted["_source_name"] = path.name
+                extracted_rows.append(extracted)
         except Exception as exc:
             extracted_rows.append(
                 {
@@ -1334,7 +1366,9 @@ def percent_display(value) -> str:
 
 def nav_link(path: str, label: str, current: str) -> str:
     active = "active" if path == current else ""
-    return f'<a class="{active}" href="{path}"><span>{esc(label)}</span></a>'
+    icons = {"/": "▦", "/bank": "▤", "/expenses": "↗", "/payroll": "♧", "/invoices": "▧", "/reports": "▥"}
+    aria = ' aria-current="page"' if active else ''
+    return f'<a class="{active}" href="{path}"{aria}><span class="nav-icon" aria-hidden="true">{icons.get(path, "·")}</span><span>{esc(label)}</span></a>'
 
 
 def layout(
@@ -1350,7 +1384,6 @@ def layout(
     metrics = db.dashboard_metrics(conn)
     title_kicker = subtitle.upper() if subtitle else "OPERATIONS"
     actions_html = page_actions if page_actions is not None else """
-          <a class="button muted" href="/">New view</a>
           <a class="button" href="/reports">Create report</a>
     """
     return f"""<!doctype html>
@@ -1360,6 +1393,8 @@ def layout(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{esc(title)} · DataFold IT</title>
   <link rel="stylesheet" href="/static/styles.css?v={static_version("styles.css")}">
+  <link rel="stylesheet" href="/static/workspace.css?v={static_version("workspace.css")}">
+  <script src="/static/theme.js?v={static_version("theme.js")}"></script>
   <script src="/static/app.js?v={static_version("app.js")}" defer></script>
 </head>
 <body>
@@ -1367,19 +1402,16 @@ def layout(
     <header class="app-header">
       <div class="header-main">
         <a class="brand" href="/">
-          <div class="brand-mark">DF</div>
-          <div class="brand-name">
-            <strong>DataFoldIT</strong>
-            <span>Your Vision. Our Expertise</span>
-          </div>
+          <span class="brand-logo"><img src="/static/datafoldit-logo.jpg" alt="DataFoldIT — Your Vision. Our Expertise."></span>
         </a>
         <div class="header-actions">
-          <span class="status-pill">Balance {money(metrics["current_balance"])}</span>
+          <span class="status-pill">{esc(os.environ.get("DATAFOLDIT_ENV_LABEL", "Operations"))}</span>
+          <button class="button ghost" type="button" data-theme-toggle aria-label="Switch color theme">Switch theme</button>
           <a class="button ghost" href="/reports">Export</a>
           <a class="button ghost" href="/logout">Sign out</a>
         </div>
       </div>
-      <nav class="nav">
+      <nav class="nav" aria-label="Main navigation">
         {nav_link("/", "Dashboard", current)}
         {nav_link("/bank", "Bank", current)}
         {nav_link("/expenses", "Expenses", current)}
@@ -1402,6 +1434,7 @@ def layout(
         {flash_html}
         {content}
       </section>
+      <footer class="workspace-footer">DataFoldIT <span>Your Vision. Our Expertise.</span></footer>
     </main>
   </div>
 </body>
@@ -1425,15 +1458,13 @@ def login_page(error: str | None = None) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in · DataFold IT</title>
   <link rel="stylesheet" href="/static/styles.css?v={static_version("styles.css")}">
+  <link rel="stylesheet" href="/static/workspace.css?v={static_version("workspace.css")}">
+  <script src="/static/theme.js?v={static_version("theme.js")}"></script>
 </head>
 <body class="login-page">
   <form class="login-card" method="post" action="/login">
     <div class="login-brand">
-      <div class="brand-mark">DF</div>
-      <div class="brand-name">
-        <strong>DataFoldIT</strong>
-        <span>Your Vision. Our Expertise</span>
-      </div>
+      <span class="brand-logo"><img src="/static/datafoldit-logo.jpg" alt="DataFoldIT — Your Vision. Our Expertise."></span>
     </div>
     <p>Operations workspace</p>
     {error_html}
@@ -1477,17 +1508,20 @@ def render_dashboard(conn, flash: str | None = None) -> str:
           <div><span>Monthly spend</span><strong>{money(metrics["month_expenses"])}</strong></div>
         </div>
       </div>
-      <div class="gauge" style="--pct: 78"><span>78%</span></div>
+      <a class="button secondary" href="/bank">View bank ledger →</a>
     </section>
     """
+    chart_rows = monthly_rows[-6:]
+    chart_max = max([max(row["deposits"], row["expenses"]) for row in chart_rows] or [1]) or 1
+    chart_bars = ''.join(
+        f'<div class="cash-month"><div class="cash-bars"><div class="cash-in" style="height:{row["deposits"] / chart_max * 100:.2f}%" title="In: {money(row["deposits"])}"></div><div class="cash-out" style="height:{row["expenses"] / chart_max * 100:.2f}%" title="Out: {money(row["expenses"])}"></div></div><span>{esc(row["month"])}</span></div>'
+        for row in chart_rows
+    ) or '<p class="empty">No cash movement recorded yet.</p>'
     trend_card = f"""
     <section class="panel chart-panel">
-      <div class="panel-header"><h2>Cash Movement</h2><span>Last periods</span></div>
-      <div class="sparkline">
-        <i style="height:32%"></i><i style="height:44%"></i><i style="height:40%"></i><i style="height:64%"></i>
-        <i style="height:52%"></i><i style="height:74%"></i><i style="height:46%"></i><i style="height:88%"></i>
-        <i style="height:62%"></i><i style="height:70%"></i><i style="height:56%"></i><i style="height:92%"></i>
-      </div>
+      <div class="panel-header"><h2>Cash Movement</h2><span>In / Out · latest recorded months</span></div>
+      <div class="cash-chart" role="img" aria-label="Monthly bank inflows and outflows. Exact values are in the Monthly Bank Summary table below.">{chart_bars}</div>
+      <div class="chart-legend"><span>● Money in</span><span>● Money out</span></div>
     </section>
     """
     monthly_table = render_table(
@@ -1508,24 +1542,51 @@ def render_dashboard(conn, flash: str | None = None) -> str:
         money_columns={1, 2, 3, 5},
     )
     recent_table = render_table(
-        ["Date", "Section", "Description", "Amount"],
-        [[row["date"], row["section"], row["label"], signed_money(row["amount"])] for row in recent_rows],
+        ["Date", "Section", "Description", "Amount", "Updated by"],
+        [[row["date"], row["section"], row["label"], signed_money(row["amount"]), db.attribution_values(row)[1]] for row in recent_rows],
         raw_columns={3},
         money_columns={3},
     )
     content = f"""
-    <div class="dashboard-grid">
-      {hero}
-      {trend_card}
-    </div>
-    <div style="height:22px"></div>
-    {cards}
+    {dashboard_section_summaries(conn, metrics)}
     <div style="height:22px"></div>
     {panel("Monthly Bank Summary", monthly_table)}
     <div style="height:22px"></div>
     {panel("Recent Activity", recent_table)}
     """
     return layout(conn, "Dashboard", "Overview", "/", content, flash)
+
+
+def dashboard_section_summaries(conn, metrics):
+    bank = conn.execute("SELECT type,amount FROM bank_transactions").fetchall()
+    movements = [db.bank_signed_amount(row) for row in bank if row["type"] != "Opening"]
+    inflows = sum(value for value in movements if value > 0)
+    outflows = -sum(value for value in movements if value < 0)
+    expense_count = conn.execute("SELECT count(*) FROM expenses").fetchone()[0]
+    categories = conn.execute("SELECT COALESCE(NULLIF(category,''),'Uncategorized') AS category, SUM(amount) AS total FROM expenses GROUP BY COALESCE(NULLIF(category,''),'Uncategorized') ORDER BY total DESC LIMIT 3").fetchall()
+    payroll = conn.execute("SELECT count(*) AS entries, COALESCE(SUM(CASE WHEN COALESCE(credit_date,'')<>'' THEN employee_pay ELSE 0 END),0) AS credited, COALESCE(SUM(CASE WHEN COALESCE(credit_date,'')='' THEN employee_pay ELSE 0 END),0) AS pending FROM payroll_entries").fetchone()
+    invoices = conn.execute("SELECT * FROM invoices").fetchall()
+    active = [row for row in invoices if not row["is_void"]]
+    overdue = [row for row in active if invoice_is_open(row) and invoice_due_status(row) == "Overdue"]
+
+    def summary(title, path, headline, total, entries, detail, note):
+        lines = ''.join(f'<div><dt>{esc(label)}</dt><dd>{esc(value)}</dd></div>' for label, value in detail)
+        return f'''<section class="panel overview-summary"><div class="panel-header"><h2>{esc(title)}</h2><a class="table-link" href="{path}">View all →</a></div><div class="panel-body"><span class="eyebrow">{esc(headline)} · all time</span><div class="overview-total">{money(total)}</div><p class="overview-count">{esc(entries)}</p><dl class="overview-details">{lines}</dl><p class="overview-note">{esc(note)}</p></div></section>'''
+
+    return '<div class="grid cols-2 overview-summaries">' + ''.join([
+        summary("Bank summary", "/bank", "Current balance", metrics["current_balance"], f"{len(bank)} transactions",
+                [("Total money in", money(inflows)), ("Total money out", money(outflows)), ("Net cash movement", money(inflows - outflows))],
+                "Money in/out exclude opening balance and include transfers and adjustments."),
+        summary("Expenses summary", "/expenses", "Recorded expenses", metrics["total_expenses"], f"{expense_count} expense records",
+                [(f"Latest recorded month ({metrics['active_month']})", money(metrics["month_expenses"]))] + [("Category: " + row["category"], money(row["total"])) for row in categories],
+                "Top categories shown. Expense records are separate from bank outflows; do not add both totals together."),
+        summary("Payroll summary", "/payroll", "Gross payroll", metrics["payroll_gross"], f"{payroll['entries']} payroll entries",
+                [("Tax deductions", money(metrics["payroll_tax"])), ("Net employee pay", money(metrics["payroll_employee_pay"])), ("Net pay with credit date", money(payroll["credited"])), ("Net pay without credit date", money(payroll["pending"]))],
+                "Payment grouping uses the recorded credit date; gross payroll is not a paid-status total."),
+        summary("Invoices summary", "/invoices", "Total invoiced", metrics["invoice_total"], f"{len(active)} active invoices · {len(invoices) - len(active)} void",
+                [("Received invoices", money(metrics["invoice_paid"])), ("Outstanding balance", money(metrics["invoice_outstanding"])), (f"Overdue ({len(overdue)})", money(sum(db.amount_value(row["balance_due"]) for row in overdue))), ("Commission received", money(metrics["invoice_commission_received"]))],
+                "Totals exclude void invoices. Overdue is part of outstanding, not an additional balance."),
+    ]) + '</div>'
 
 
 def metric_card(label: str, value: str, note: str, tone: str = "info") -> str:
@@ -1692,6 +1753,7 @@ def render_bank(conn, flash: str | None = None, filters: dict[str, str] | None =
         money_columns={5, 6},
         raw_headers=set(range(8)),
         row_attrs=row_attrs,
+        attribution_rows=rows,
     )
     ledger_panel = f"""
     <section class="panel ledger-panel">
@@ -1976,6 +2038,7 @@ def render_expenses(conn, flash: str | None = None, filters: dict[str, str] | No
         money_columns={4},
         raw_headers=set(range(9)),
         row_attrs=row_attrs,
+        attribution_rows=rows,
     )
     expense_log_body = f"""
     <section class="panel ledger-panel">
@@ -2154,6 +2217,7 @@ def render_payroll(conn, flash: str | None = None, filters: dict[str, str] | Non
         money_columns={6, 8, 9, 10},
         raw_headers=set(range(14)),
         row_attrs=row_attrs,
+        attribution_rows=rows,
     )
     ledger_panel = f"""
     <section class="panel ledger-panel">
@@ -2311,6 +2375,7 @@ def render_paystub_bulk_review(conn, extracted_rows: list[dict], flash: str | No
 
 INVOICE_STATUS_OPTIONS = ["Received", "Not Received", "Void"]
 INVOICE_SORT_KEYS = {
+    "received_date",
     "date",
     "invoice_number",
     "customer",
@@ -2698,6 +2763,7 @@ def render_invoice_edit(conn, invoice_id: int, flash: str | None = None) -> str:
       {input_field("commission_pct", "Commission %", "number", value=currency_input(row["commission_pct"]), step="0.01")}
       {input_field("commission_amount", "Commission Amount", "number", value=currency_input(row["commission_amount"]), step="0.01")}
       {input_field("due_date", "Due Date", "date", value=row["due_date"])}
+      {input_field("received_date", "Received Date", "date", value=row["received_date"])}
       {invoice_status_select(invoice_status_label(row))}
       {input_field("balance_due", "Balance Due", "number", value=currency_input(row["balance_due"]), step="0.01")}
       <label class="span-4">Attachments
@@ -2765,13 +2831,14 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             create_input(create_form_id, "customer", "text", placeholder="Customer", required=True, list_id="customer-options")
             + datalist_options("customer-options", customer_options),
             create_select(create_form_id, "status", INVOICE_STATUS_OPTIONS, "Not Received"),
+            create_input(create_form_id, "received_date", "date"),
             '<span class="status-badge due" data-invoice-inline-due-status>Draft</span>',
             create_input(create_form_id, "due_date", "date"),
             create_input(create_form_id, "amount", "number", step="0.01", placeholder="0.00", required=True),
             create_input(create_form_id, "commission_pct", "number", step="0.01", value="30", placeholder="30"),
             '<span class="inline-derived-value" data-invoice-inline-commission>--</span>',
             create_input(create_form_id, "balance_due", "number", step="0.01", placeholder="0.00"),
-            inline_file_cell(create_form_id, "invoice", "/invoices/extract-inline"),
+            inline_file_cell(create_form_id, "invoice", "/invoices/extract-inline", "multiple"),
             create_actions,
         ]
     ]
@@ -2785,6 +2852,7 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
                 editable_input(form_id, "invoice_number", row["invoice_number"], row["invoice_number"], required=True),
                 editable_input(form_id, "customer", row["customer"], row["customer"], required=True),
                 editable_select(form_id, "status", invoice_status_label(row), INVOICE_STATUS_OPTIONS, invoice_status_label(row), required=True),
+                editable_input(form_id, "received_date", row["received_date"] or "—", row["received_date"], "date"),
                 invoice_due_status_badge(row),
                 editable_input(form_id, "due_date", row["due_date"], row["due_date"], "date"),
                 editable_input(form_id, "amount", money(row["amount"]), currency_input(row["amount"]), "number", step="0.01", required=True),
@@ -2809,6 +2877,7 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             invoice_sort_header("Invoice #", "invoice_number", filters),
             invoice_sort_header("Customer", "customer", filters),
             invoice_sort_header("Status", "status", filters),
+            invoice_sort_header("Received Date", "received_date", filters),
             invoice_sort_header("Due Status", "due_status", filters),
             invoice_sort_header("Due Date", "due_date", filters),
             invoice_sort_header("Amount", "amount", filters),
@@ -2819,10 +2888,11 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
             "Action",
         ],
         table_rows,
-        raw_columns=set(range(12)),
-        money_columns={6, 8, 9},
-        raw_headers=set(range(11)),
+        raw_columns=set(range(13)),
+        money_columns={7, 9, 10},
+        raw_headers=set(range(12)),
         row_attrs=row_attrs,
+        attribution_rows=rows,
     )
     ledger_panel = f"""
     <section class="panel ledger-panel">
@@ -2839,6 +2909,8 @@ def render_invoices(conn, flash: str | None = None, filters: dict[str, str] | No
     </section>
     """
     content = section_stack(kpis, ledger_panel)
+    upload_panel = panel("Upload invoices", '''<div class="panel-body"><form method="post" action="/invoices/extract" enctype="multipart/form-data" class="actions"><label>Choose files<input type="file" name="attachment" multiple required></label><button class="button" type="submit">Read and review invoices</button></form><p class="inline-file-status">Upload a combined PDF or several files. Each detected invoice will appear separately for review before saving.</p></div>''')
+    content = section_stack(kpis, upload_panel, ledger_panel)
     return layout(conn, "Invoices", "Receivables", "/invoices", content, flash, invoice_filter_form(conn, filters))
 
 
@@ -2886,6 +2958,13 @@ def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | No
         source_pdf = extracted.get("source_pdf") or ""
         source_name = extracted.get("_source_name") or Path(source_pdf).name or "Uploaded file"
         source_html = attachment_link(source_pdf) or esc(source_name)
+        if extracted.get("source_pages"):
+            source_html += '<small class="inline-file-status">Pages: ' + esc(', '.join(map(str, extracted["source_pages"]))) + '</small>'
+        warning = extracted.get("_warning", "")
+        if extracted.get("invoice_number") and conn.execute("SELECT 1 FROM invoices WHERE lower(invoice_number)=lower(?) LIMIT 1", (extracted["invoice_number"],)).fetchone():
+            warning = (warning + " Invoice number already exists; unchecked to avoid an accidental duplicate.").strip()
+        if warning:
+            source_html += '<small class="inline-file-status">' + esc(warning) + '</small>'
         if extracted.get("_ok") is False:
             rows_html.append(
                 f"""
@@ -2903,7 +2982,7 @@ def render_invoice_bulk_review(conn, extracted_rows: list[dict], flash: str | No
         rows_html.append(
             f"""
             <tr>
-              <td><input class="bulk-check" type="checkbox" name="include_{form_index}" aria-label="Save {esc(source_name)}" checked></td>
+              <td><input class="bulk-check" type="checkbox" name="include_{form_index}" aria-label="Save {esc(source_name)}" {'' if warning else 'checked'}></td>
               <td>{source_html}<input type="hidden" name="source_pdf_{form_index}" value="{esc(source_pdf)}"></td>
               <td>{bulk_input(f"date_{form_index}", "Date", "date", extracted.get("date"), required=True)}</td>
               <td>{bulk_input(f"invoice_number_{form_index}", "Invoice number", "text", invoice_number, required=True)}</td>
@@ -2980,7 +3059,6 @@ def render_reports(conn, flash: str | None = None, filters: dict[str, str] | Non
     filters = filters or {"year": "", "month": ""}
     month = f"{filters['year']}-{filters['month']}" if filters.get("year") and filters.get("month") else db.active_month(conn)
     today = time.strftime("%Y-%m-%d")
-    import_path = esc(str(DEFAULT_SOURCE_XLSX))
     metrics = db.dashboard_metrics(conn)
     scope = period_label(filters)
     selected_period = "monthly" if filters.get("year") and filters.get("month") else "all"
@@ -3013,19 +3091,9 @@ def render_reports(conn, flash: str | None = None, filters: dict[str, str] | Non
           <a class="button secondary" href="/backup.db">Download database backup</a>
         </div>
       </section>
-      <section class="panel">
-        <div class="panel-header"><h2>Import Workbook</h2></div>
-        <div class="panel-body">
-          <form class="form-grid" method="post" action="/import">
-            {input_field("workbook_path", "Workbook Path", "text", value=import_path, css="span-4")}
-            <label><span>Replace existing records</span><select name="replace"><option value="">No</option><option value="Y">Yes</option></select></label>
-            <div class="span-4 actions"><button class="button warning" type="submit">Import workbook</button></div>
-          </form>
-        </div>
-      </section>
     </div>
     """
-    body = section_stack(kpis, controls, panel("Audit Log", render_audit_table(conn, filters)))
+    body = section_stack(kpis, controls)
     return layout(conn, "Reports", "Exports", "/reports", body, flash, period_filter_form(conn, "/reports", "reports", filters))
 
 
@@ -3033,9 +3101,17 @@ def render_audit_table(conn, filters: dict[str, str] | None = None) -> str:
     filters = filters or {"year": "", "month": ""}
     rows = filter_rows_by_period(db.rows_for_table(conn, "audit_log", limit=80), "created_at", filters)
     return render_table(
-        ["When", "Action", "Entity", "ID", "Details"],
-        [[row["created_at"], row["action"], row["entity"], row["entity_id"], row["details"]] for row in rows],
+        ["When", "Action", "Entity", "ID", "Updated by", "Details"],
+        [[row["created_at"], row["action"], row["entity"], row["entity_id"], audit_actor(row["details"]), row["details"]] for row in rows],
     )
+
+
+def audit_actor(details):
+    try:
+        parsed = json.loads(details or "{}")
+        return parsed.get("actor") or "Not recorded" if isinstance(parsed, dict) else "Not recorded"
+    except (TypeError, ValueError):
+        return "Not recorded"
 
 
 def render_table(
@@ -3046,7 +3122,11 @@ def render_table(
     raw_headers: set[int] | None = None,
     row_attrs: list[str] | None = None,
     detail_rows: list[str] | None = None,
+    attribution_rows: list | None = None,
 ) -> str:
+    if attribution_rows is not None:
+        headers = [*headers, "Updated by"]
+        rows = [[*rows[0], "Assigned on save"], *[[*display, db.attribution_values(record)[1]] for display, record in zip(rows[1:], attribution_rows)]]
     raw_columns = raw_columns or set()
     money_columns = money_columns or set()
     raw_headers = raw_headers or set()

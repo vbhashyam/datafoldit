@@ -1,0 +1,23 @@
+{
+  "name": "datafoldit-production",
+  "main": "production-worker.mjs",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ffd1f71df12ae3e828f9aeede4e087d1",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [{"pattern":"www.accounts.datafoldit.com","custom_domain":true}],
+  "vars": {
+    "DEPLOYMENT_ENV": "production",
+    "RELEASE_PHASE": "live",
+    "PUBLIC_ORIGIN": "https://www.accounts.datafoldit.com"
+  },
+  "assets": {"directory":"./public","binding":"ASSETS","run_worker_first":true},
+  "observability": {"enabled":false},
+  "d1_databases": [{
+    "binding":"DB",
+    "database_name":"datafoldit-production",
+    "database_id":"b6a2d9d1-0c4c-4b2f-992e-98e94c0a1196",
+    "migrations_dir":"migrations"
+  }]
+}

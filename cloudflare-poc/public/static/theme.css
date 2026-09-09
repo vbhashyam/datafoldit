@@ -1,0 +1,28 @@
+:root[data-theme=light]{color-scheme:light;color:#17283e;background:#f3f6fa;--money-in:#146b49;--money-out:#b13b49}
+:root[data-theme=light] body{background:radial-gradient(ellipse at top right,#d5ecec99,transparent 55%)}
+:root[data-theme=light] aside{background:#f5f8fcf2;border-color:#cbd5e1}
+:root[data-theme=light] aside img{filter:invert(1);mix-blend-mode:multiply}
+:root[data-theme=light] aside a{color:#46576b}
+:root[data-theme=light] aside a.active,:root[data-theme=light] aside a:hover{background:#d9eeef;color:#075f68}
+:root[data-theme=light] header,:root[data-theme=light] td,:root[data-theme=light] th,:root[data-theme=light] .summary-lines dt,:root[data-theme=light] .summary-lines dd{border-color:#d8e0e9}
+:root[data-theme=light] article,:root[data-theme=light] form{background:linear-gradient(135deg,#ffffffed,#f5f9fce8);border-color:#d3dde8;box-shadow:0 8px 28px #29425e0b}
+:root[data-theme=light] button,:root[data-theme=light] input,:root[data-theme=light] select{background:#fff;color:#17283e;border-color:#bdcad8}
+:root[data-theme=light] button:hover{border-color:#087d86}
+:root[data-theme=light] button.primary{background:#137e87;color:white;border-color:#137e87}
+:root[data-theme=light] .table-wrap{background:#ffffffd9;border-color:#d3dde8}
+:root[data-theme=light] tr:hover{background:#e7f3f4;box-shadow:inset 3px 0 #167f88}
+:root[data-theme=light] th,:root[data-theme=light] label,:root[data-theme=light] aside p,:root[data-theme=light] header span,:root[data-theme=light] .notice,:root[data-theme=light] article p,:root[data-theme=light] .view-description,:root[data-theme=light] .summary-lines dt,:root[data-theme=light] .ledger-metrics,:root[data-theme=light] .import-panel p,:root[data-theme=light] .excel-reports p{color:#526278}
+:root[data-theme=light] .card-heading a,:root[data-theme=light] .table-wrap a,:root[data-theme=light] #message,:root[data-theme=light] .ledger-metrics span:first-child{color:#086d76}
+:root[data-theme=light] .import-panel,:root[data-theme=light] .ledger-heading,:root[data-theme=light] .transaction-action-options{background:#f7fafc;border-color:#c6d5e2}
+:root[data-theme=light] .transaction-action-options{box-shadow:0 8px 24px #243c5926}
+:root[data-theme=light] .transaction-action-options .delete-action{color:#b13b49}
+:root[data-theme=light] .invoice-draft{background:#e0f1f2}
+:root[data-theme=light] .invoice-draft .draft-actions{background:#dfedef;box-shadow:-4px 0 10px #28405312}
+:root[data-theme=light] .sort-column{background:transparent;border:0;color:inherit}
+:root[data-theme=light] .sort-column:hover{color:#086d76}
+:root[data-theme=light] .excel-reports input:disabled{background:#e4e9ef;color:#718096;border-color:#d4dce5;opacity:.6}
+#theme-toggle{white-space:nowrap}
+:root[data-theme=light] .column-filter-trigger{background:transparent;color:#526278;border:0}:root[data-theme=light] .column-filter-trigger.filter-active{background:#d9eeef;color:#075f68}
+:root[data-theme=light] .columns-popup p{color:#526278}:root[data-theme=light] .columns-list input{accent-color:#137e87}
+:root[data-theme=light] .value-filter-popup p{color:#526278}:root[data-theme=light] .filter-values input[type=checkbox]{accent-color:#137e87}
+:root[data-theme=light] .summary-card strong{color:#17283e}:root[data-theme=light] .summary-card h2,:root[data-theme=light] .export-popup p{color:#526278}

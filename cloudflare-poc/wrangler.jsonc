@@ -1,0 +1,18 @@
+{
+  "name": "datafoldit-test-poc",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ffd1f71df12ae3e828f9aeede4e087d1",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {"directory":"./public","binding":"ASSETS","run_worker_first":true},
+  "routes": [],
+  "observability": { "enabled": false },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "datafoldit-test-poc",
+    "database_id": "f51ca820-3450-4b0c-b93c-a532a5dafb79",
+    "migrations_dir": "migrations"
+  }]
+}

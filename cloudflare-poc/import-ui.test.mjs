@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+import {JSDOM} from 'jsdom';
+import {fields} from './dashboard.mjs';
+const bundle=await build({entryPoints:['import-ui.mjs'],bundle:true,write:false,format:'iife',globalName:'Importer',plugins:[{name:'synthetic-reader',setup(b){b.onResolve({filter:/import-reader\.mjs$/},()=>({path:'reader',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:`export async function readTransactions(){return Array.from({length:10},(_,i)=>({data:{date:'2026-09-08',invoice_number:'TEST-'+i,customer:'Synthetic',amount:100,status:'Open',balance_due:100},source:'Page '+(i+1),warning:'Review values'}));}`}));}}]});
+const dom=new JSDOM('<input id="csrf" value="test"><main></main>',{runScripts:'outside-only'}),w=dom.window;
+w.eval(bundle.outputFiles[0].text);w.confirm=()=>{throw Error('Native confirmation must not be used');};let sent=0,refreshes=0;
+w.fetch=async(path,options)=>{sent++;assert.equal(path,'/api/import');const rows=JSON.parse(options.body.get('rows'));assert.equal(rows.length,9);assert.equal(rows[0].data.invoice_number,'TEST-1');return {ok:true,json:async()=>({count:9})};};
+w.Importer.openImport({kind:'invoices',fields,host:w.document.querySelector('main'),initialFile:new w.File(['test'],'sample.pdf'),existingRecords:[{kind:'invoices',data:{invoice_number:'TEST-0',customer:'Synthetic'}}],onSaved:async()=>refreshes++});
+await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(w.document.querySelectorAll('input[type=checkbox]').length,10);
+assert.equal(w.document.querySelectorAll('input[type=checkbox]:checked').length,9);
+assert.equal(sent,0,'file reading does not write before review');
+const save=[...w.document.querySelectorAll('button')].find(b=>b.textContent==='Import selected transactions');await save.onclick();assert.equal(sent,1);assert.equal(refreshes,1);
+console.log('PASS: file auto-read, ten prefilled rows, existing invoice excluded, nine separate entries saved without native confirmation');

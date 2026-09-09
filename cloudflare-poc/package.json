@@ -1,0 +1,27 @@
+{
+  "name": "datafoldit-cloudflare-compatibility",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:imports": "node build-import.mjs",
+    "test:imports": "node import.test.mjs && node import-formats.test.mjs && node inline-row.test.mjs",
+    "test": "node probe.mjs && node storage.test.mjs && node auth.test.mjs && node invitations.test.mjs && node smtp.test.mjs && node http.test.mjs && node dashboard.test.mjs && node financial-views.test.mjs && node bundled-financial-views.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "miniflare": "^4.0.0",
+    "wrangler": "^4.130.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "undici": "^7.29.1"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.2",
+    "pdfjs-dist": "^6.3.289",
+    "qrcode-generator": "^2.0.4",
+    "tesseract.js": "^7.0.0"
+  }
+}

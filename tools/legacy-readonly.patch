@@ -1,0 +1,61 @@
+*** Begin Patch
+*** Update File: /Users/vamsikrishnabhashyam/Documents/datafoldit-prod/datafoldit/web.py
+@@
+ DEFAULT_PASSWORD = "datafoldit-local"
++READ_ONLY_COMPARISON = True
+@@
+-    conn = db.connect(db_path)
+-    db.init_db(conn)
+-    backfill_payroll_tax_breakdowns_from_attachments(conn)
+-    source = Path(args.import_xlsx) if args.import_xlsx else DEFAULT_SOURCE_XLSX
+-    auto_import = os.environ.get("DATAFOLDIT_AUTO_IMPORT", "1").strip().lower()
+-    auto_import_enabled = auto_import not in {"0", "false", "no", "off"}
+-    if args.import_xlsx or (auto_import_enabled and db.is_empty(conn) and source.exists()):
+-        counts = import_company_workbook(conn, source, replace=args.replace or db.is_empty(conn))
+-        print(f"Imported workbook: {source}")
+-        print(", ".join(f"{key}={value}" for key, value in counts.items()))
+-    conn.close()
++    if READ_ONLY_COMPARISON:
++        if args.import_xlsx or args.replace:
++            raise RuntimeError("Old production is read-only for comparison")
++        with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
++            conn.execute("PRAGMA query_only=ON")
++            conn.execute("SELECT count(*) FROM bank_transactions").fetchone()
++    else:
++        conn = db.connect(db_path)
++        db.init_db(conn)
++        backfill_payroll_tax_breakdowns_from_attachments(conn)
++        source = Path(args.import_xlsx) if args.import_xlsx else DEFAULT_SOURCE_XLSX
++        auto_import = os.environ.get("DATAFOLDIT_AUTO_IMPORT", "1").strip().lower()
++        auto_import_enabled = auto_import not in {"0", "false", "no", "off"}
++        if args.import_xlsx or (auto_import_enabled and db.is_empty(conn) and source.exists()):
++            counts = import_company_workbook(conn, source, replace=args.replace or db.is_empty(conn))
++            print(f"Imported workbook: {source}")
++            print(", ".join(f"{key}={value}" for key, value in counts.items()))
++        conn.close()
+@@
+-    print(f"Password: {os.environ.get('DATAFOLDIT_PASSWORD', DEFAULT_PASSWORD)}")
++    if not READ_ONLY_COMPARISON:
++        print(f"Password: {os.environ.get('DATAFOLDIT_PASSWORD', DEFAULT_PASSWORD)}")
+@@
+-                self._conn = db.connect(db_path)
+-                db.init_db(self._conn)
++                if READ_ONLY_COMPARISON:
++                    self._conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
++                    self._conn.row_factory = sqlite3.Row
++                    self._conn.execute("PRAGMA query_only=ON")
++                else:
++                    self._conn = db.connect(db_path)
++                    db.init_db(self._conn)
+@@
+         def do_POST(self) -> None:
+             parsed = urlparse(self.path)
++            if READ_ONLY_COMPARISON and parsed.path != "/login":
++                self.send_json({"error": "Read-only comparison. Make changes at https://www.accounts.datafoldit.com"}, HTTPStatus.FORBIDDEN)
++                return
+@@
+         def send_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
++            if READ_ONLY_COMPARISON:
++                body = body.replace("<body>", '<body><div role="status" style="padding:16px;background:#163547;color:white;text-align:center">Read-only comparison — use <a style="color:#83f2e1" href="https://www.accounts.datafoldit.com">the new production dashboard</a> for changes.</div>', 1)
+             payload = body.encode("utf-8")
+*** End Patch

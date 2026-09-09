@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS poc_mfa_pending (
+  user_id TEXT PRIMARY KEY REFERENCES poc_users(id) ON DELETE CASCADE,
+  secret TEXT NOT NULL, expires INTEGER NOT NULL
+);

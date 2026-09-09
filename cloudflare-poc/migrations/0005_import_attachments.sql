@@ -1,0 +1,4 @@
+CREATE TABLE import_files(id TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL CHECK(size BETWEEN 1 AND 10485760),sha TEXT NOT NULL,uploaded_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(kind,sha));
+CREATE TABLE import_chunks(file_id TEXT NOT NULL REFERENCES import_files(id) ON DELETE CASCADE,position INTEGER NOT NULL,data BLOB NOT NULL,PRIMARY KEY(file_id,position));
+CREATE TABLE record_attachments(record_id TEXT NOT NULL REFERENCES dashboard_records(id) ON DELETE CASCADE,file_id TEXT NOT NULL REFERENCES import_files(id),PRIMARY KEY(record_id,file_id));
+CREATE TRIGGER import_quota BEFORE INSERT ON import_files WHEN (SELECT COALESCE(SUM(size),0) FROM import_files)+(SELECT COALESCE(SUM(size),0) FROM test_files)+NEW.size>104857600 OR (SELECT COUNT(*) FROM import_files)>=100 BEGIN SELECT RAISE(ABORT,'Test attachment quota reached'); END;

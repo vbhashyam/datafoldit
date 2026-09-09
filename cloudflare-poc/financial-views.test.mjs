@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {financialSummary,filterReport,reportGroups,makeCsv} from './financial-views.mjs';
+import {dashboardJs} from './dashboard.mjs';
+const r=(kind,data)=>({kind,data,updated_by:'Sample data'});
+const rows=[r('bank',{date:'2026-08-01',type:'Opening',amount:1000}),r('bank',{date:'2026-09-01',type:'Deposit',amount:500}),r('bank',{date:'2026-09-08',type:'Expense',amount:100}),r('expenses',{date:'2026-08-01',category:'Software',amount:40}),r('expenses',{date:'2026-09-08',category:'Software',amount:60}),r('payroll',{month:'2026-09',gross:1000,tax:100,commission:100,employee_pay:800,credit_date:''}),r('invoices',{date:'2026-09-01',status:'Paid',amount:300,balance_due:0}),r('invoices',{date:'2026-09-02',status:'Open',amount:500,balance_due:200,due_date:'2026-09-07'}),r('invoices',{date:'2026-09-03',status:'VOID',amount:900,balance_due:0})];
+const s=financialSummary(rows,'2026-09-08');assert.equal(s.bank.balance,1400);assert.equal(s.bank.incoming,500);assert.equal(s.bank.net,400);assert.equal(s.expenses.latestTotal,60);assert.equal(s.expenses.categories[0][1],100);assert.equal(s.payroll.pending,800);assert.equal(s.invoices.total,800);assert.equal(s.invoices.overdue,200);assert.equal(s.invoices.voidCount,1);
+assert.equal(filterReport(rows,'expenses','2026-09-08','2026-09-08').length,1);assert.equal(filterReport(rows,'payroll','2026-09-15','2026-09-20').length,1);assert.equal(filterReport(rows,'expenses','','','SOFTWARE').length,2);assert.equal(filterReport(rows,'expenses','2027-01-01').length,0);
+assert.deepEqual(reportGroups(filterReport(rows,'expenses'),'expenses'),[{name:'Software',count:2,total:100}]);
+const csv=makeCsv([r('expenses',{description:'=DANGEROUS()',amount:10})],['description','amount']);assert.ok(csv.includes("'=DANGEROUS()"));assert.ok(csv.includes('\r\n'));assert.ok(!csv.includes('\\r\\n'));assert.equal(financialSummary([]).invoices.total,0);new Function(dashboardJs);
+assert.ok(dashboardJs.includes("if(tab==='reports'){reportsView();return;}"));assert.ok(dashboardJs.includes("if(tab==='dashboard'){detailedDashboard();return;}"));
+console.log('PASS: distinct views, financial totals, void exclusion, overdue subset, inclusive date/month filters, search, grouping, safe CSV and browser script syntax');

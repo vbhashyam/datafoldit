@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {smtpConversation} from './invitation-mail.mjs';
+const enc=new TextEncoder(),dec=new TextDecoder(),commands=[];
+const replies=['220 ready\r\n','250-test\r\n250 AUTH LOGIN\r\n','334 username\r\n','334 password\r\n','235 accepted\r\n','250 ok\r\n','250 ok\r\n','354 continue\r\n','250 queued\r\n','221 bye\r\n'];
+let controller;
+const socket={readable:new ReadableStream({start(c){controller=c;c.enqueue(enc.encode(replies.shift()));}}),writable:new WritableStream({write(bytes){commands.push(dec.decode(bytes));controller.enqueue(enc.encode(replies.shift()));}})};
+assert.equal(await smtpConversation(socket,{sender:'vamsi@datafoldit.com',password:'fake-not-a-real-password'},'person@example.test','https://example.test/accept#token=synthetic'),true);
+assert.equal(commands[0],'EHLO datafoldit-test-poc.vamsibh07.workers.dev\r\n');
+assert.equal(commands[5],'RCPT TO:<person@example.test>\r\n');
+assert.match(commands[7],/Content-Transfer-Encoding: base64/);
+console.log('PASS: encrypted-transport SMTP dialogue handles multiline replies and confirms queue acceptance.');

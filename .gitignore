@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .env
+private-backups/
+smtp-invitations.json
+smtp-invitations.pending
 
 data/*.db
 data/*.sqlite

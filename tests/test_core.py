@@ -48,6 +48,23 @@ class DataFoldCoreTests(unittest.TestCase):
         self.conn.close()
         self.tmpdir.cleanup()
 
+    def test_invoice_received_date_roundtrip(self):
+        payload = {"date": "2026-05-01", "invoice_number": "DATE-1", "amount": 100,
+                   "status": "Received", "received_date": "2026-05-10"}
+        invoice_id = db.add_invoice(self.conn, payload)
+        def saved_date():
+            return self.conn.execute("SELECT received_date FROM invoices WHERE id = ?", (invoice_id,)).fetchone()[0]
+        self.assertEqual(saved_date(), "2026-05-10")
+        payload["received_date"] = "2026-05-12"
+        db.update_invoice(self.conn, invoice_id, payload)
+        self.assertEqual(saved_date(), "2026-05-12")
+        del payload["received_date"]
+        db.update_invoice(self.conn, invoice_id, payload)
+        self.assertEqual(saved_date(), "2026-05-12")
+        payload["received_date"] = ""
+        db.update_invoice(self.conn, invoice_id, payload)
+        self.assertIsNone(saved_date())
+
     def test_import_current_workbook(self):
         if not DEFAULT_SOURCE_XLSX.exists():
             self.skipTest(f"Missing source workbook: {DEFAULT_SOURCE_XLSX}")

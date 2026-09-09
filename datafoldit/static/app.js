@@ -1,4 +1,52 @@
 (function () {
+  var positionKey = "datafoldit-save-position";
+
+  function rememberPagePosition() {
+    try {
+      sessionStorage.setItem(positionKey, JSON.stringify({
+        path: location.pathname, time: Date.now(),
+        x: window.scrollX, y: window.scrollY,
+        tables: Array.from(document.querySelectorAll(".table-wrap")).map(function (table) {
+          return { x: table.scrollLeft, y: table.scrollTop };
+        })
+      }));
+    } catch (error) { /* Saving still works if browser storage is unavailable. */ }
+  }
+
+  function restorePagePosition() {
+    var saved;
+    try {
+      saved = JSON.parse(sessionStorage.getItem(positionKey) || "null");
+      sessionStorage.removeItem(positionKey);
+    } catch (error) { return; }
+    if (!saved || saved.path !== location.pathname || Date.now() - saved.time > 60000) { return; }
+    function restore() {
+      window.scrollTo({ left: saved.x, top: saved.y, behavior: "instant" });
+      document.querySelectorAll(".table-wrap").forEach(function (table, index) {
+        var position = saved.tables[index];
+        if (position) { table.scrollLeft = position.x; table.scrollTop = position.y; }
+      });
+    }
+    restore();
+    // Font metrics can change the table height just after the initial render.
+    var interrupted = false;
+    function interrupt() { interrupted = true; }
+    ["wheel", "touchstart", "keydown", "pointerdown"].forEach(function (name) {
+      window.addEventListener(name, interrupt, { once: true, passive: true });
+    });
+    if (document.fonts) {
+      document.fonts.ready.then(function () { if (!interrupted) { restore(); } });
+    }
+  }
+
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!event.defaultPrevented && form instanceof HTMLFormElement &&
+        !/\/(login|logout|accept)(?:$|\?)/.test(form.action)) {
+      rememberPagePosition();
+    }
+  });
+
   function numberValue(form, name) {
     var input = controlFor(form, name);
     if (!input) {
@@ -235,11 +283,15 @@
       return;
     }
     row.classList.toggle("is-editing", editing);
+    row.querySelectorAll(".is-editing-cell").forEach(function (cell) {
+      cell.classList.remove("is-editing-cell");
+    });
     rowEditors(row).forEach(function (editor) {
       editor.disabled = !editing;
     });
     setActionState(row, editing);
     if (editing && focusEditor) {
+      focusEditor.closest("td").classList.add("is-editing-cell");
       focusEditor.focus();
       if (typeof focusEditor.select === "function" && focusEditor.tagName !== "SELECT") {
         focusEditor.select();
@@ -330,7 +382,11 @@
     var kind = fileInput.getAttribute("data-extract-kind") || "payroll";
     var url = fileInput.getAttribute("data-extract-url") || "/payroll/extract-inline";
     var payload = new FormData();
-    payload.append("attachment", file);
+    if (kind === "invoice") {
+      Array.from(fileInput.files).forEach(function (item) { payload.append("attachment", item); });
+    } else {
+      payload.append("attachment", file);
+    }
     fileInput.disabled = true;
     if (row) {
       row.classList.add("is-reading");
@@ -341,7 +397,7 @@
       method: "POST",
       body: payload,
       credentials: "same-origin",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", "X-CSRF-Token": (document.querySelector('meta[name="csrf-token"]') || {}).content || "" },
     })
       .then(function (response) {
         return response
@@ -357,6 +413,10 @@
           });
       })
       .then(function (data) {
+        if (data.review_url) {
+          window.location.assign(data.review_url);
+          return;
+        }
         fillFromExtract(form, data, kind);
         fileInput.value = "";
         setInlineFileStatus(fileInput, "Filled from " + (data.source_name || file.name), "success");
@@ -373,6 +433,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    restorePagePosition();
     document.querySelectorAll("[data-auto-upload-form]").forEach(function (uploadForm) {
       var fileInput = uploadForm.querySelector("[data-auto-submit-file]");
       var submitButton = uploadForm.querySelector('button[type="submit"]');
@@ -400,6 +461,7 @@
       var statusSelect = statusForm.querySelector('select[name="status"]');
       if (statusSelect) {
         statusSelect.addEventListener("change", function () {
+          rememberPagePosition();
           statusSelect.disabled = true;
           statusForm.submit();
         });
@@ -480,6 +542,7 @@
         }
         window.setTimeout(function () {
           if (window.confirm(message)) {
+            rememberPagePosition();
             confirmForm.setAttribute("data-confirmed", "true");
             confirmForm.submit();
           } else if (row) {
@@ -497,6 +560,7 @@
         }
         var firstInput = row.querySelector(".cell-editor");
         closeInlineEdits(row);
+        resetRowEditors(row);
         setRowEditing(row, true, firstInput);
       });
     });
@@ -522,7 +586,23 @@
           return;
         }
         closeInlineEdits(row);
+        resetRowEditors(row);
         setRowEditing(row, true, editor);
+      });
+    });
+
+    document.querySelectorAll(".cell-editor").forEach(function (editor) {
+      editor.addEventListener("keydown", function (event) {
+        var row = editor.closest("tr");
+        if (event.key === "Escape") {
+          event.preventDefault();
+          resetRowEditors(row);
+          setRowEditing(row, false);
+        } else if (event.key === "Enter" && editor.tagName !== "TEXTAREA") {
+          event.preventDefault();
+          var save = row.querySelector(".inline-save-button");
+          if (save) { save.click(); }
+        }
       });
     });
 
