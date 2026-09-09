@@ -1,0 +1,18 @@
+{
+  "environment": "isolated-test-prototype",
+  "account_id": "ffd1f71df12ae3e828f9aeede4e087d1",
+  "database_name": "datafoldit-test-poc",
+  "database_id": "f51ca820-3450-4b0c-b93c-a532a5dafb79",
+  "database_schema_applied": true,
+  "worker_deployed": true,
+  "url": "https://datafoldit-test-poc.vamsibh07.workers.dev",
+  "version_id": "60e25f18-a6d3-4c3d-8094-e005683cc2a1",
+  "invitations_schema_applied": true,
+  "hosted_password_login_verified": true,
+  "password_algorithm": "scrypt N=32768 r=8 p=3",
+  "test_email_credentials_configured": true,
+  "admin_verification_email_smtp_accepted": true,
+  "admin_enrollment_pending": true,
+  "production_routes_modified": false,
+  "r2_activated": false
+}

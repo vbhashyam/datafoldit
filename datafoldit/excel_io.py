@@ -184,6 +184,7 @@ def import_invoices(conn, workbook) -> int:
                 "customer": item.get("Customer"),
                 "is_void": item.get("Void?"),
                 "received": item.get("Received"),
+                "received_date": item.get("Received Date"),
                 "due_date": item.get("Due Date"),
                 "amount": item.get("Amount"),
                 "commission_pct": value_from(item, "Commission %", "Commission Percent", "Pct"),
@@ -240,6 +241,12 @@ def export_report_workbook(
     build_expenses_sheet(workbook.create_sheet("Expenses"), report_data["expenses"])
     build_payroll_sheet(workbook.create_sheet("Payroll"), report_data["payroll"])
     build_invoices_sheet(workbook.create_sheet("Invoices"), report_data["invoices"])
+    for name, key in (("Bank Transactions", "bank"), ("Expenses", "expenses"), ("Payroll", "payroll"), ("Invoices", "invoices")):
+        ws = workbook[name]
+        column = ws.max_column + 1
+        ws.cell(1, column, "Updated by")
+        for index, row in enumerate(report_data[key], 2):
+            ws.cell(index, column, db.attribution_values(row)[1])
     for ws in workbook.worksheets:
         style_sheet(ws)
     workbook.save(output)
@@ -371,6 +378,7 @@ def build_invoices_sheet(ws, rows) -> None:
             "Status",
             "Balance Due",
             "Source PDF",
+            "Received Date",
         ]
     )
     for row in rows:
@@ -388,6 +396,7 @@ def build_invoices_sheet(ws, rows) -> None:
                 row["status"],
                 row["balance_due"],
                 row["source_pdf"] if "source_pdf" in row.keys() else None,
+                row["received_date"] if "received_date" in row.keys() else None,
             ]
         )
 

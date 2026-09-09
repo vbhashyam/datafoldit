@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextvars import ContextVar
 from collections import OrderedDict
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parent.parent
+ACTOR = ContextVar("audit_actor", default=None)
 DEFAULT_DB_PATH = ROOT / "data" / "datafoldit.db"
 
 POSITIVE_BANK_TYPES = {"Opening", "Deposit", "Transfer In", "Adjustment In"}
@@ -130,6 +132,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_column(conn, "invoices", "source_pdf", "TEXT")
+    ensure_column(conn, "invoices", "received_date", "TEXT")
     ensure_column(conn, "bank_transactions", "attachment_path", "TEXT")
     ensure_column(conn, "expenses", "attachment_path", "TEXT")
     ensure_column(conn, "payroll_entries", "attachment_path", "TEXT")
@@ -141,7 +144,37 @@ def init_db(conn: sqlite3.Connection) -> None:
     backfill_invoice_commissions(conn)
     normalize_legacy_payroll_vendor_pay(conn)
     ensure_primary_account(conn)
+    ensure_attribution(conn)
     conn.commit()
+
+
+ATTRIBUTION_TABLES = {"bank_transaction": "bank_transactions", "expense": "expenses", "payroll_entry": "payroll_entries", "invoice": "invoices"}
+
+
+def ensure_attribution(conn):
+    for table in ATTRIBUTION_TABLES.values():
+        ensure_column(conn, table, "created_by", "TEXT")
+        ensure_column(conn, table, "updated_by", "TEXT")
+    if get_setting(conn, "attribution_backfilled_v1"):
+        return
+    for row in conn.execute("SELECT action,entity,entity_id,details FROM audit_log ORDER BY id").fetchall():
+        table = ATTRIBUTION_TABLES.get(row["entity"])
+        if not table or row["action"] not in {"create", "update", "update_status"}:
+            continue
+        try:
+            details = json.loads(row["details"] or "{}")
+            actor = details.get("actor") if isinstance(details, dict) else None
+        except (ValueError, TypeError):
+            actor = None
+        if row["action"] == "create":
+            conn.execute(f"UPDATE {table} SET created_by=?,updated_by=? WHERE id=?", (actor, actor, row["entity_id"]))
+        else:
+            conn.execute(f"UPDATE {table} SET updated_by=? WHERE id=?", (actor, row["entity_id"]))
+    set_setting(conn, "attribution_backfilled_v1", "1")
+
+
+def attribution_values(row):
+    return [row[key] if key in row.keys() and row[key] else "Not recorded" for key in ("created_by", "updated_by")]
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -245,7 +278,16 @@ def audit(
     entity_id: int | None,
     details: dict[str, Any] | str | None = None,
 ) -> None:
+    table = ATTRIBUTION_TABLES.get(entity)
+    if table and entity_id is not None:
+        if action == "create":
+            conn.execute(f"UPDATE {table} SET created_by=?,updated_by=? WHERE id=?", (ACTOR.get(), ACTOR.get(), entity_id))
+        elif action in {"update", "update_status"}:
+            conn.execute(f"UPDATE {table} SET updated_by=? WHERE id=?", (ACTOR.get(), entity_id))
     if isinstance(details, dict):
+        details = {key: value for key, value in details.items() if key not in {"csrf", "password", "code", "token"}}
+        if ACTOR.get():
+            details = {**details, "actor": ACTOR.get()}
         details_value = json.dumps(details, default=str, sort_keys=True)
     else:
         details_value = details
@@ -515,8 +557,8 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
         """
         INSERT INTO invoices
             (date, invoice_number, customer, is_void, received, due_date, amount,
-             commission_pct, commission_amount, status, balance_due, source_pdf)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             commission_pct, commission_amount, status, balance_due, source_pdf, received_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             invoice_date,
@@ -531,6 +573,7 @@ def add_invoice(conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
             status,
             balance_due,
             clean_text(payload.get("source_pdf")),
+            normalize_date(payload.get("received_date")),
         ),
     )
     entity_id = int(cur.lastrowid)
@@ -576,7 +619,7 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
         UPDATE invoices
         SET date = ?, invoice_number = ?, customer = ?, is_void = ?, received = ?,
             due_date = ?, amount = ?, commission_pct = ?, commission_amount = ?,
-            status = ?, balance_due = ?, source_pdf = ?, updated_at = CURRENT_TIMESTAMP
+            status = ?, balance_due = ?, source_pdf = ?, received_date = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (
@@ -592,6 +635,7 @@ def update_invoice(conn: sqlite3.Connection, invoice_id: int, payload: dict[str,
             status,
             balance_due,
             source_pdf,
+            normalize_date(payload["received_date"]) if "received_date" in payload else row["received_date"],
             invoice_id,
         ),
     )
@@ -856,9 +900,10 @@ def recent_activity(conn: sqlite3.Connection, limit: int = 10) -> list[dict[str,
             "section": "Bank",
             "label": row["detail"] or row["category"] or row["type"],
             "amount": bank_signed_amount(row),
+            "created_by": row["created_by"], "updated_by": row["updated_by"],
         }
         for row in conn.execute(
-            "SELECT date, type, category, detail, amount FROM bank_transactions ORDER BY date DESC, id DESC LIMIT ?",
+            "SELECT date, type, category, detail, amount, created_by, updated_by FROM bank_transactions ORDER BY date DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     ]
@@ -868,9 +913,10 @@ def recent_activity(conn: sqlite3.Connection, limit: int = 10) -> list[dict[str,
             "section": "Expense",
             "label": row["description"] or row["vendor"] or row["category"],
             "amount": -abs(amount_value(row["amount"])),
+            "created_by": row["created_by"], "updated_by": row["updated_by"],
         }
         for row in conn.execute(
-            "SELECT date, category, vendor, description, amount FROM expenses ORDER BY date DESC, id DESC LIMIT ?",
+            "SELECT date, category, vendor, description, amount, created_by, updated_by FROM expenses ORDER BY date DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     ]
@@ -880,9 +926,10 @@ def recent_activity(conn: sqlite3.Connection, limit: int = 10) -> list[dict[str,
             "section": "Invoice",
             "label": f"{row['invoice_number']} · {row['customer'] or ''}",
             "amount": amount_value(row["amount"]),
+            "created_by": row["created_by"], "updated_by": row["updated_by"],
         }
         for row in conn.execute(
-            "SELECT date, invoice_number, customer, amount FROM invoices ORDER BY date DESC, id DESC LIMIT ?",
+            "SELECT date, invoice_number, customer, amount, created_by, updated_by FROM invoices ORDER BY date DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     ]

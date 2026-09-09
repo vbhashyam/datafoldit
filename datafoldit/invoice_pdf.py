@@ -37,6 +37,61 @@ def extract_invoice_from_pdf(pdf_path: str | Path) -> dict[str, Any]:
     return fields
 
 
+def extract_invoices_from_file(pdf_path: str | Path) -> list[dict[str, Any]]:
+    """Read every PDF page; preserve page failures instead of silently losing invoices."""
+    path = Path(pdf_path).expanduser()
+    with path.open("rb") as source:
+        is_pdf = source.read(5) == b"%PDF-"
+    if not is_pdf:
+        return [extract_invoice_from_pdf(path)]
+    info_tool = find_tool("pdfinfo")
+    if not info_tool:
+        raise RuntimeError("Install Poppler to import all pages of a PDF safely.")
+    info = subprocess.run([info_tool, str(path)], check=True, capture_output=True, text=True, timeout=20).stdout
+    match = re.search(r"^Pages:\s+(\d+)", info, re.M)
+    if not match:
+        raise ValueError("Could not determine PDF page count.")
+    count = int(match[1])
+    if count > 100:
+        raise ValueError("Upload PDFs with at most 100 pages per file.")
+    pages = []
+    text_tool = find_tool("pdftotext")
+    if text_tool:
+        try:
+            text = subprocess.run([text_tool, "-layout", str(path), "-"], check=True, capture_output=True, text=True, timeout=30).stdout
+            pages = text.split("\f")
+        except (subprocess.SubprocessError, OSError):
+            pass
+    page_texts = []
+    for index in range(count):
+        text = pages[index] if index < len(pages) else ""
+        if not useful_text(text):
+            text = extract_text_with_pdftoppm_ocr(path, page_number=index + 1)
+        page_texts.append(text)
+    return invoice_rows_from_pages(page_texts, path)
+
+
+def invoice_rows_from_pages(pages: list[str], path: Path) -> list[dict[str, Any]]:
+    groups = []
+    for index, text in enumerate(pages, 1):
+        number = extract_invoice_number(normalize_text(text)) if useful_text(text) else None
+        if number and groups and groups[-1]["number"] == number:
+            groups[-1]["text"] += "\n" + text
+            groups[-1]["pages"].append(index)
+        else:
+            groups.append({"number": number, "text": text, "pages": [index]})
+    rows = []
+    for group in groups:
+        row = parse_invoice_text(group["text"]) if useful_text(group["text"]) else {}
+        row.update(source_pdf=str(path), source_pages=group["pages"], raw_text_excerpt=group["text"][:3000])
+        if not useful_text(group["text"]):
+            row.update(_ok=False, error="No readable invoice text on this page. Upload a clearer copy.")
+        elif not group["number"]:
+            row["_warning"] = "Invoice number not detected. This may be a continuation page; review before selecting."
+        rows.append(row)
+    return rows
+
+
 def extract_text(pdf_path: Path) -> str:
     text = extract_structured_file_text(pdf_path)
     if useful_text(text):
@@ -68,7 +123,7 @@ def extract_structured_file_text(path: Path) -> str:
     return ""
 
 
-def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
+def extract_text_with_pdftoppm_ocr(pdf_path: Path, page_number: int = 1) -> str:
     pdftoppm = find_tool("pdftoppm")
     tesseract = find_tool("tesseract")
     if not pdftoppm or not tesseract:
@@ -77,7 +132,7 @@ def extract_text_with_pdftoppm_ocr(pdf_path: Path) -> str:
         image_prefix = Path(tmp) / "page"
         try:
             subprocess.run(
-                [pdftoppm, "-png", "-singlefile", "-r", "220", str(pdf_path), str(image_prefix)],
+                [pdftoppm, "-f", str(page_number), "-l", str(page_number), "-png", "-singlefile", "-r", "220", str(pdf_path), str(image_prefix)],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

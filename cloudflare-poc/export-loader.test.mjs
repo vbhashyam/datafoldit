@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {runInNewContext} from 'node:vm';
+import {exportLoaderJs} from './export-loader.mjs';
+const make=()=>runInNewContext(exportLoaderJs+'\nloadExportModule');
+let loader=make(),urls=[];const module={exportWorkbook(){}};
+assert.equal(await loader(async url=>{urls.push(url);if(urls.length===1)throw TypeError('Failed to fetch dynamically imported module');return module;}),module);assert.equal(urls.length,2);assert.notEqual(urls[0],urls[1]);assert.equal(await loader(()=>{throw Error('Should reuse loaded module');}),module);
+loader=make();let count=0;await assert.rejects(loader(async()=>{count++;throw TypeError('Network load failed');}),/Check your connection/);assert.equal(count,2);assert.equal(await loader(async()=>module),module,'failed loads do not poison later attempts');
+loader=make();count=0;await assert.rejects(loader(async()=>{count++;throw SyntaxError('Unexpected token');}),/Unexpected token/);assert.equal(count,1,'do not conceal code errors with network retries');
+loader=make();count=0;const load=async()=>{count++;return module;};await Promise.all([loader(load),loader(load)]);assert.equal(count,1);
+console.log('PASS: fresh-URL retry, successful module reuse, recoverable failures, concurrent load sharing and unchanged code-error reporting');

@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {DatabaseSync} from 'node:sqlite';
+import {Miniflare} from 'miniflare';
+import {recordApi} from './dashboard.mjs';
+import {commitImport} from './bulk-import.mjs';
+import {operationalBackup} from './data-backup.mjs';
+const mf=new Miniflare({modules:true,compatibilityDate:'2026-08-06',d1Databases:['DB'],script:"export default {fetch(){return new Response('test')}}"});
+try{
+ const db=await mf.getD1Database('DB');await db.exec('CREATE TABLE test_files(size INTEGER);');
+ const migrate=async file=>db.exec((await readFile('migrations/'+file,'utf8')).replaceAll('\n',' '));
+ for(const file of ['0004_dashboard.sql','0005_import_attachments.sql','0006_unique_invoice_number.sql'])await migrate(file);
+ const data={date:'2026-09-09',amount:100,type:'Deposit',status:'Open',month:'2026-09',gross:100,paystub_sent:'N'};
+ await db.prepare('INSERT INTO dashboard_records(id,kind,data,updated_by) VALUES(?,?,?,?)').bind('old','bank',JSON.stringify(data),'original@example.test').run();
+ await migrate('0007_transaction_tracking.sql');
+ const old=await db.prepare("SELECT * FROM dashboard_records WHERE id='old'").first();assert.equal(old.tracking_id,'BNK-000001');assert.equal(old.version,1);assert.equal(old.updated_by,'original@example.test');
+ const user={email:'synthetic@example.invalid',role:'write',csrf:'test'};
+ const call=body=>recordApi(new Request('https://test/api/records',{method:'POST',headers:{'X-CSRF-Token':'test'}}),db,user,body);
+ const get=id=>db.prepare('SELECT * FROM dashboard_records WHERE id=?').bind(id).first();
+ const create=async kind=>{const response=await call({action:'create',kind,data:{...data,tracking_id:'FAKE'}});assert.equal(response.status,200);return get((await response.json()).id);};
+ const bank=await create('bank'),expense=await create('expenses'),payroll=await create('payroll');assert.equal(bank.tracking_id,'BNK-000002');assert.equal(expense.tracking_id,'EXP-000001');assert.equal(payroll.tracking_id,'PAY-000001');
+ assert.equal((await call({action:'update',id:bank.id,version:1,data:{...data,amount:200,tracking_id:'CHANGED'}})).status,200);assert.equal((await get(bank.id)).tracking_id,bank.tracking_id);
+ await call({action:'delete',id:bank.id,version:2});assert.equal((await create('bank')).tracking_id,'BNK-000003');
+ const concurrent=await Promise.all([create('expenses'),create('expenses')]);assert.deepEqual(concurrent.map(r=>r.tracking_id).sort(),['EXP-000002','EXP-000003']);
+ const imported=await commitImport(db,user,'expenses','synthetic.pdf',new TextEncoder().encode('%PDF-1.7 synthetic'),Array.from({length:10},(_,i)=>({data:{...data,description:'Synthetic '+i},source:'Page '+(i+1)})));
+ const ids=await Promise.all(imported.ids.map(id=>get(id)));assert.equal(new Set(ids.map(r=>r.tracking_id)).size,10);assert.equal(ids[0].tracking_id,'EXP-000004');assert.equal(ids[9].tracking_id,'EXP-000013');
+ await assert.rejects(db.prepare('UPDATE dashboard_records SET tracking_id=? WHERE id=?').bind('EXP-NEW',expense.id).run(),/cannot be changed/);
+ const backup=await operationalBackup(db),restore=new DatabaseSync(':memory:');restore.exec(await backup.text());
+ restore.prepare('INSERT INTO dashboard_records(id,kind,data,updated_by) VALUES(?,?,?,?)').run('restored-new','expenses',JSON.stringify(data),user.email);
+ assert.equal(restore.prepare("SELECT tracking_id FROM dashboard_records WHERE id='restored-new'").get().tracking_id,'EXP-000014');restore.close();
+ console.log('PASS: backfill, separate sequences, read-only IDs, edit stability, no reuse after deletion, concurrent saves, ten bulk IDs and backup sequence restoration');
+}finally{await mf.dispose();}

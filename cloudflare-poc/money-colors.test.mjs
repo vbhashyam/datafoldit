@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {amountTone} from './financial-views.mjs';
+for(const type of ['Expense','Withdrawal','Transfer Out','Adjustment Out'])assert.equal(amountTone('bank',{type,amount:100},'amount'),'money-out');
+for(const type of ['Deposit','Transfer In','Adjustment In'])assert.equal(amountTone('bank',{type,amount:100},'amount'),'money-in');
+assert.equal(amountTone('bank',{type:'Opening',amount:100},'amount'),'');
+assert.equal(amountTone('expenses',{amount:10},'amount'),'money-out');
+for(const key of ['gross','tax','employee_pay'])assert.equal(amountTone('payroll',{[key]:10},key),'money-out');
+assert.equal(amountTone('payroll',{hours:160},'hours'),'');
+assert.equal(amountTone('invoices',{amount:100,status:'VOID'},'amount'),'');
+assert.equal(amountTone('invoices',{balance_due:100,status:'Open'},'balance_due'),'money-in');
+assert.equal(amountTone('expenses',{amount:0},'amount'),'');
+const luminance=hex=>hex.match(/[a-f0-9]{2}/gi).map(x=>parseInt(x,16)/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((v,x,i)=>v+x*[.2126,.7152,.0722][i],0);
+for(const color of ['79d9af','ed969d'])for(const bg of ['0b101c','142030','182332'])assert.ok((luminance(color)+.05)/(luminance(bg)+.05)>4.5);
+console.log('PASS: transaction direction colors, neutral exclusions, and readable contrast on navy surfaces');

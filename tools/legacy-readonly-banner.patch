@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: /Users/vamsikrishnabhashyam/Documents/datafoldit-prod/datafoldit/web.py
+@@
+-                body = body.replace("<body>", '<body><div role="status" style="padding:16px;background:#163547;color:white;text-align:center">Read-only comparison — use <a style="color:#83f2e1" href="https://www.accounts.datafoldit.com">the new production dashboard</a> for changes.</div>', 1)
++                body = re.sub(r"<body\b[^>]*>", lambda match: match.group(0) + '<div role="status" style="padding:16px;background:#163547;color:white;text-align:center">Read-only comparison — use <a style="color:#83f2e1" href="https://www.accounts.datafoldit.com">the new production dashboard</a> for changes.</div>', body, count=1)
+*** End Patch
